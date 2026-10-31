@@ -1,0 +1,9 @@
+build/
+.gradle/
+.kotlin/
+data/
+*.iml
+.idea/
+web/node_modules/
+web/dist/
+web/.gradle/

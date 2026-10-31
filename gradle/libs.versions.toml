@@ -1,0 +1,26 @@
+[versions]
+spring-boot = "4.1.2"
+graalvm = "24.1.1"
+shadow = "9.6.1"
+node-gradle = "7.1.0"
+nodejs = "24.22.2"
+
+[libraries]
+spring-boot-bom = { module = "org.springframework.boot:spring-boot-dependencies", version.ref = "spring-boot" }
+spring-boot-starter-webmvc = { module = "org.springframework.boot:spring-boot-starter-webmvc" }
+spring-boot-starter-jdbc = { module = "org.springframework.boot:spring-boot-starter-jdbc" }
+spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+jackson-databind = { module = "tools.jackson.core:jackson-databind" }
+graalvm-polyglot = { module = "org.graalvm.polyglot:polyglot", version.ref = "graalvm" }
+# What org.graalvm.polyglot:js-community (a POM-only artifact) stands for.
+graalvm-js-language = { module = "org.graalvm.js:js-language", version.ref = "graalvm" }
+graalvm-truffle-runtime = { module = "org.graalvm.truffle:truffle-runtime", version.ref = "graalvm" }
+h2 = { module = "com.h2database:h2" }
+postgresql = { module = "org.postgresql:postgresql" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
+shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
+node = { id = "com.github.node-gradle.node", version.ref = "node-gradle" }

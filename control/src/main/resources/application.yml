@@ -1,0 +1,20 @@
+spring:
+  application.name: prod-access
+  datasource:
+    # Dev default. In EKS point this at RDS Postgres: SPRING_DATASOURCE_URL / _USERNAME / _PASSWORD.
+    url: jdbc:h2:file:./data/prodaccess;MODE=PostgreSQL;DB_CLOSE_ON_EXIT=FALSE
+  sql.init.mode: always
+
+server.shutdown: graceful
+
+prodaccess:
+  # Identity normally comes from the SSO proxy header (X-User). Empty = reject requests without it.
+  dev-user: ""
+  gateway:
+    base-url: http://localhost:9000
+    token-url: http://localhost:9000/oauth/token
+  runner:
+    jar: runner/build/libs/runner.jar
+    max-concurrent: 4
+  # Replace with the Vault-backed CredentialProvider; ref names match clients.credential_ref.
+  credentials: {}
