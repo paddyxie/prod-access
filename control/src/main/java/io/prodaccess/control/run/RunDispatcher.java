@@ -1,25 +1,22 @@
 package io.prodaccess.control.run;
 
 import io.prodaccess.common.json.Json;
-import io.prodaccess.common.protocol.Access;
-import io.prodaccess.common.protocol.ApiDef;
 import io.prodaccess.common.protocol.RunEvent;
 import io.prodaccess.common.protocol.RunSpec;
-import io.prodaccess.control.apicatalog.ApiCatalogService;
-import io.prodaccess.control.apicatalog.ApiEntry;
-import io.prodaccess.control.client.Client;
-import io.prodaccess.control.client.ClientService;
-import io.prodaccess.control.client.CredentialProvider;
+import io.prodaccess.common.protocol.ToolDef;
 import io.prodaccess.control.config.ProdAccessProperties;
+import io.prodaccess.control.ownership.OwnershipService;
 import io.prodaccess.control.process.ChildProcessRunner.Outcome;
 import io.prodaccess.control.process.ChildProcessRunner;
 import io.prodaccess.control.task.TaskService;
 import io.prodaccess.control.task.TaskVersion;
+import io.prodaccess.control.tool.Tool;
+import io.prodaccess.control.tool.ToolService;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -46,26 +43,23 @@ public class RunDispatcher {
     private final TransactionTemplate tx;
     private final ProdAccessProperties props;
     private final ChildProcessRunner runner;
-    private final CredentialProvider credentials;
     private final RunService runs;
     private final TaskService tasks;
-    private final ClientService clients;
-    private final ApiCatalogService catalog;
+    private final ToolService tools;
+    private final OwnershipService ownership;
     private final String node = "node-" + UUID.randomUUID().toString().substring(0, 8);
     private final AtomicInteger active = new AtomicInteger();
 
     RunDispatcher(JdbcClient db, TransactionTemplate tx, ProdAccessProperties props, ChildProcessRunner runner,
-                  CredentialProvider credentials, RunService runs, TaskService tasks, ClientService clients,
-                  ApiCatalogService catalog) {
+                  RunService runs, TaskService tasks, ToolService tools, OwnershipService ownership) {
         this.db = db;
         this.tx = tx;
         this.props = props;
         this.runner = runner;
-        this.credentials = credentials;
         this.runs = runs;
         this.tasks = tasks;
-        this.clients = clients;
-        this.catalog = catalog;
+        this.tools = tools;
+        this.ownership = ownership;
     }
 
     public boolean paused() {
@@ -132,40 +126,24 @@ public class RunDispatcher {
     void execute(String runId) {
         Run run = runs.get(runId);
         TaskVersion v = tasks.version(run.taskId(), run.ver());
-        Client client = clients.get(run.clientId());
-        Map<String, ApiEntry> known = new HashMap<>();
-        catalog.all().forEach(a -> known.put(a.key(), a));
 
-        // Re-check at the last moment: what runs must be exactly what was approved.
-        if (!client.enabled()) { finish(runId, RunStatus.FAILED, null, "client '" + client.name() + "' is disabled"); return; }
-        if (!RunService.approvalHash(v, run).equals(run.approvalHash())) {
-            finish(runId, RunStatus.FAILED, null, "integrity check failed: run content differs from what was approved");
+        // Re-check at the last moment: ownership and the registry may have changed while the run was queued.
+        Set<String> notOwned = ownership.notOwned(run.submittedBy(), v.roles());
+        if (!notOwned.isEmpty()) {
+            finish(runId, RunStatus.FAILED, null, "ownership lost while queued: none of your teams owns " + String.join(", ", notOwned));
             return;
         }
-        List<ApiDef> apis = new ArrayList<>();
-        boolean needsApproval = false;
-        for (String o : v.ops()) {
-            ApiEntry a = known.get(o);
-            if (a == null) { finish(runId, RunStatus.FAILED, null, "operation " + o + " was removed from the API list"); return; }
-            needsApproval |= a.access().equals(Access.WRITE.name());
-            apis.add(new ApiDef(a.service(), a.operation(), a.method(), a.pathTemplate(), Access.valueOf(a.access())));
-        }
-        if (needsApproval && run.approvedBy() == null) {
-            finish(runId, RunStatus.FAILED, null, "operation classification changed to WRITE after submission; resubmit for approval");
-            return;
+        Map<String, Tool> registered = tools.byKey(v.tools());
+        List<ToolDef> defs = new ArrayList<>();
+        for (String key : v.tools()) {
+            Tool t = registered.get(key);
+            if (t == null) { finish(runId, RunStatus.FAILED, null, "tool " + key + " was removed from the registry"); return; }
+            defs.add(t.def());
         }
 
-        RunSpec.ClientAuth auth;
-        try {
-            auth = credentials.resolve(client.credentialRef());
-        } catch (RuntimeException e) {
-            finish(runId, RunStatus.FAILED, null, "cannot resolve client credentials: " + e.getMessage());
-            return;
-        }
         Map<String, Object> meta = (Map<String, Object>) Json.readTree(v.metaJson());
         var spec = new RunSpec(RunSpec.CURRENT_VERSION, runId, RunSpec.Mode.RUN, run.submittedBy(), v.script(),
-                (Map<String, Object>) Json.readTree(run.paramsJson()), apis, limits(meta), auth,
-                new RunSpec.Gateway(props.gateway().baseUrl(), props.gateway().tokenUrl()));
+                (Map<String, Object>) Json.readTree(run.paramsJson()), defs, limits(meta), props.apiForge().toSpec());
 
         var logBytes = new AtomicLong();
         var truncated = new AtomicBoolean();
@@ -188,10 +166,7 @@ public class RunDispatcher {
 
     private void record(String runId, RunEvent ev, AtomicLong logBytes, AtomicBoolean truncated, int maxLogBytes) {
         switch (ev.t()) {
-            case "api" -> db.sql("""
-                    INSERT INTO api_call_audit (run_id, ts, service, operation, method, path, status, duration_ms, error)
-                    VALUES (?,?,?,?,?,?,?,?,?)""")
-                    .params(runId, ev.ts(), ev.service(), ev.operation(), ev.method(), ev.path(), ev.status(), ev.ms(), ev.err()).update();
+            case "tool" -> runs.recordToolCall(runId, ev);
             case "log", "step", "error" -> {
                 String msg = ev.t().equals("step") ? ev.name() + " " + ev.state() : ev.msg();
                 if (logBytes.addAndGet(msg == null ? 0 : msg.length()) > maxLogBytes) {
@@ -209,9 +184,7 @@ public class RunDispatcher {
     }
 
     private void finish(String runId, RunStatus status, String resultJson, String error) {
-        int n = db.sql("UPDATE runs SET status = ?, finished_at = ?, result_json = ?, error = ? WHERE id = ? AND status = 'RUNNING'")
-                .params(status.name(), System.currentTimeMillis(), resultJson, error, runId).update();
-        if (n == 0) log.warn("run {} was no longer RUNNING when it finished as {} (swept as LOST?)", runId, status);
+        if (!runs.finish(runId, status, resultJson, error)) log.warn("run {} was no longer RUNNING when it finished as {} (swept as LOST?)", runId, status);
     }
 
     /** Ceilings from configuration; a task's meta may only lower them. */

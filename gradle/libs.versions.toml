@@ -1,6 +1,6 @@
 [versions]
 spring-boot = "4.1.2"
-graalvm = "24.1.1"
+quickjs4j = "0.1.1"
 shadow = "9.6.1"
 node-gradle = "7.1.0"
 nodejs = "24.22.2"
@@ -11,10 +11,7 @@ spring-boot-starter-webmvc = { module = "org.springframework.boot:spring-boot-st
 spring-boot-starter-jdbc = { module = "org.springframework.boot:spring-boot-starter-jdbc" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
 jackson-databind = { module = "tools.jackson.core:jackson-databind" }
-graalvm-polyglot = { module = "org.graalvm.polyglot:polyglot", version.ref = "graalvm" }
-# What org.graalvm.polyglot:js-community (a POM-only artifact) stands for.
-graalvm-js-language = { module = "org.graalvm.js:js-language", version.ref = "graalvm" }
-graalvm-truffle-runtime = { module = "org.graalvm.truffle:truffle-runtime", version.ref = "graalvm" }
+quickjs4j = { module = "io.roastedroot:quickjs4j", version.ref = "quickjs4j" }
 h2 = { module = "com.h2database:h2" }
 postgresql = { module = "org.postgresql:postgresql" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }

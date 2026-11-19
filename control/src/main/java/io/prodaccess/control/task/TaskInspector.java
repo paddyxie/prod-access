@@ -26,7 +26,7 @@ public class TaskInspector {
     @SuppressWarnings("unchecked")
     public Inspection inspect(String script) {
         var spec = new RunSpec(RunSpec.CURRENT_VERSION, UUID.randomUUID().toString(), RunSpec.Mode.INSPECT, "inspector",
-                script, Map.of(), List.of(), new RunSpec.Limits(10_000, 0, 0, 0, 0), null, null);
+                script, Map.of(), List.of(), new RunSpec.Limits(10_000, 0, 0, 0, 0), null);
         var found = new AtomicReference<Map<String, Object>>();
         var outcome = runner.execute(spec, ev -> {
             if (ev.t().equals("inspect")) found.set((Map<String, Object>) ev.value());

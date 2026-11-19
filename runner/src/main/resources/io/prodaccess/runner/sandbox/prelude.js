@@ -1,13 +1,19 @@
-// Evaluated once per sandbox. Receives the capability object `host` (strings in, strings out)
-// and exposes only the intended globals: param, api, ctx (passed to main), log, console, batch.
+// Runs ahead of the task module, in the same QuickJS module. Takes the host capabilities, removes every
+// other way out of the sandbox, and exposes only the intended globals: param, api, log, console, batch,
+// ApiError. The suffix the host appends after the task hands its exports to __prodaccess.
 (function (host) {
   'use strict';
   const g = globalThis;
+  delete g.__host;
+  delete g.Javy; // Javy's file-descriptor IO
+  delete g.eval;
+
   const str = (v) => {
     if (typeof v === 'string') return v;
     try { const s = JSON.stringify(v); return s === undefined ? String(v) : s; } catch (e) { return String(v); }
   };
   const fmt = (args) => args.map(str).join(' ');
+  const describe = (e) => (e && e.stack ? String(e) + '\n' + e.stack : String(e));
 
   const desc = (type, o) => Object.assign({ type }, o || {});
   g.param = {
@@ -42,10 +48,10 @@
   g.ApiError = ApiError;
 
   const api = {};
-  for (const op of JSON.parse(host.ops())) {
-    const [service, operation] = op.split('.');
-    (api[service] || (api[service] = {}))[operation] = (args) => {
-      const r = JSON.parse(host.call(service, operation, JSON.stringify(args === undefined ? {} : args)));
+  for (const key of JSON.parse(host.tools())) {
+    const [role, name] = key.split('.');
+    (api[role] || (api[role] = {}))[name] = (args) => {
+      const r = JSON.parse(host.call(key, JSON.stringify(args === undefined ? {} : args)));
       if (r.ok) return r.value;
       throw new ApiError(r.error, r.status, r.body);
     };
@@ -88,21 +94,16 @@
     },
   });
 
-  return {
-    inspect: (ns) => JSON.stringify({ meta: ns.meta === undefined ? null : ns.meta, params: ns.params === undefined ? {} : ns.params }),
-    start: (ns, runId, paramsJson) => {
-      const out = { state: 'pending' };
-      if (typeof ns.default !== 'function') {
-        out.state = 'error';
-        out.message = 'task module must export a default function main(ctx)';
-        return out;
-      }
-      Promise.resolve()
-        .then(() => ns.default(ctx(runId, JSON.parse(paramsJson))))
-        .then(
-          (v) => { out.state = 'ok'; out.value = v === undefined ? 'null' : JSON.stringify(v); },
-          (e) => { out.state = 'error'; out.message = String((e && e.stack) || e); });
-      return out;
+  Object.defineProperty(g, '__prodaccess', {
+    configurable: true,
+    value: {
+      inspect: (meta, params) => host.result(JSON.stringify({ meta: meta === undefined ? null : meta, params: params === undefined ? {} : params })),
+      run: (main, runId, params) => {
+        if (typeof main !== 'function') return host.fail('task module must export a default function main(ctx)');
+        Promise.resolve()
+          .then(() => main(ctx(runId, params)))
+          .then((v) => host.result(v === undefined ? 'null' : JSON.stringify(v)), (e) => host.fail(describe(e)));
+      },
     },
-  };
-})
+  });
+})(globalThis.__host);

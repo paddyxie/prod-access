@@ -3,7 +3,7 @@ package io.prodaccess.runner;
 import io.prodaccess.common.json.Json;
 import io.prodaccess.common.protocol.RunEvent;
 import io.prodaccess.common.protocol.RunSpec;
-import io.prodaccess.runner.gateway.SimpleGatewayClient;
+import io.prodaccess.common.tool.Tools;
 import io.prodaccess.runner.sandbox.Sandbox;
 import java.io.BufferedReader;
 import java.io.FileDescriptor;
@@ -12,15 +12,10 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
-import org.graalvm.polyglot.PolyglotException;
-import org.graalvm.polyglot.Value;
-import org.graalvm.polyglot.proxy.ProxyExecutable;
 
 /**
  * Child process entry. Protocol: first stdin line = {@link RunSpec} JSON; later stdin lines are commands
- * ("cancel"); stdout = one {@link RunEvent} JSON per line. One process serves exactly one run and one
- * Client identity, then exits.
+ * ("cancel"); stdout = one {@link RunEvent} JSON per line. One process serves exactly one run, then exits.
  *
  * <p>Exit codes: 0 success, 1 task failed, 2 bad spec, 124 timed out, 130 cancelled, 70 lost the parent.
  */
@@ -68,56 +63,46 @@ public final class RunnerMain {
     }
 
     private static int inspect(RunSpec spec, Emitter emitter) {
-        try (Sandbox sb = new Sandbox(spec.script(), Map.of("ops", __ -> "[]", "log", __ -> null, "step", __ -> null, "call", __ -> null),
-                System.err)) {
+        Sandbox.Host host = new Sandbox.Host() {
+            public String tools() { return "[]"; }
+            public String call(String tool, String argsJson) { return "{\"ok\":false,\"error\":\"tools cannot be called while inspecting\"}"; }
+            public void log(String level, String message) {}
+            public void step(String name, String state) {}
+        };
+        try (Sandbox sb = new Sandbox(host)) {
             sandbox = sb;
-            Value ns = sb.load();
-            emitter.emit(RunEvent.withValue("inspect", Json.readTree(sb.inspect(ns))));
+            Sandbox.Outcome out = sb.inspect(spec.script());
+            if (!out.ok()) {
+                emitter.emit(RunEvent.error(Emitter.clip(out.error())));
+                return 1;
+            }
+            emitter.emit(RunEvent.withValue("inspect", Json.readTree(out.value())));
             return 0;
-        } catch (PolyglotException e) {
-            emitter.emit(RunEvent.error(Emitter.clip(describe(e))));
-            return 1;
         }
     }
 
     private static int run(RunSpec spec, Emitter emitter) {
-        ApiInvoker invoker = new ApiInvoker(spec.apis(), new SimpleGatewayClient(spec), emitter, spec.limits());
-        Map<String, ProxyExecutable> host = Map.of(
-                "ops", a -> Json.write(invoker.operations()),
-                "call", a -> invoker.call(a[0].asString(), a[1].asString(), a[2].asString()),
-                "log", a -> {
-                    emitter.emit(RunEvent.log(a[0].asString(), Emitter.clip(a[1].asString())));
-                    return null;
-                },
-                "step", a -> {
-                    emitter.emit(RunEvent.step(a[0].asString(), a[1].asString()));
-                    return null;
-                });
-        try (Sandbox sb = new Sandbox(spec.script(), host, System.err)) {
+        ToolInvoker invoker = new ToolInvoker(spec.tools(), new Tools(spec.apiForge(), spec.runId(), spec.actor()), emitter, spec.limits());
+        Sandbox.Host host = new Sandbox.Host() {
+            public String tools() { return Json.write(invoker.keys()); }
+            public String call(String tool, String argsJson) { return invoker.call(tool, argsJson); }
+            public void log(String level, String message) { emitter.emit(RunEvent.log(level, Emitter.clip(message))); }
+            public void step(String name, String state) { emitter.emit(RunEvent.step(name, state)); }
+        };
+        try (Sandbox sb = new Sandbox(host)) {
             sandbox = sb;
-            Value ns = sb.load();
-            Value out = sb.start(ns, spec.runId(), Json.write(spec.params()));
-            String state = out.getMember("state").asString();
-            if (state.equals("ok")) {
-                String value = out.getMember("value").asString();
-                if (value.length() > spec.limits().maxResultBytes()) {
-                    emitter.emit(RunEvent.error("result larger than " + spec.limits().maxResultBytes() + " bytes"));
-                    return 1;
-                }
-                emitter.emit(RunEvent.withValue("result", Json.readTree(value)));
-                return 0;
+            Sandbox.Outcome out = sb.run(spec.script(), Json.write(spec.runId()), Json.write(spec.params()));
+            if (!out.ok()) {
+                emitter.emit(RunEvent.error(Emitter.clip(out.error())));
+                return 1;
             }
-            emitter.emit(RunEvent.error(Emitter.clip(state.equals("error") ? out.getMember("message").asString() : "task did not settle")));
-            return 1;
-        } catch (PolyglotException e) {
-            emitter.emit(RunEvent.error(Emitter.clip(describe(e))));
-            return 1;
+            if (out.value().length() > spec.limits().maxResultBytes()) {
+                emitter.emit(RunEvent.error("result larger than " + spec.limits().maxResultBytes() + " bytes"));
+                return 1;
+            }
+            emitter.emit(RunEvent.withValue("result", Json.readTree(out.value())));
+            return 0;
         }
-    }
-
-    private static String describe(PolyglotException e) {
-        if (e.isCancelled()) return "cancelled";
-        return e.getMessage();
     }
 
     /** Reads commands after the spec; EOF means the parent is gone, so exit instead of lingering. */

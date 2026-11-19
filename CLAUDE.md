@@ -3,8 +3,8 @@
 ## Layout
 
 ```
-common/   io.prodaccess.common.{json,protocol,param}   shared by control and runner; no Spring
-runner/   io.prodaccess.runner[.sandbox|.gateway]       the forked child; gateway/ is the replaceable Gateway seam
+common/   io.prodaccess.common.{json,protocol,param,tool}  shared by control and runner; no Spring; tool/ is the API Forge seam
+runner/   io.prodaccess.runner[.sandbox]                 the forked child; sandbox/ is QuickJS (WASM on the JVM)
 control/  io.prodaccess.control.<feature>               Spring Boot app
 web/      src/{api,components,hooks,lib,pages}          React + MUI UI
 ```
@@ -15,8 +15,9 @@ Build is Gradle (`./gradlew build`); versions only in `gradle/libs.versions.toml
 ## Backend: package by feature
 
 `control` is split by feature, not by layer. A feature package holds its records, service, controller and anything
-only it uses: `client`, `apicatalog`, `task`, `run`, `admin`. Cross-cutting pieces have their own package:
-`process` (child process supervision), `security`, `audit`, `config`, `web` (errors), `jdbc`.
+only it uses: `tool` (the registry), `task`, `run`, `admin`. Cross-cutting pieces have their own package:
+`ownership` (CMDB roles and teams), `process` (child process supervision), `security`, `audit`, `config`,
+`web` (errors), `jdbc`.
 
 - Controllers are package-private and thin; the actor always comes from `CurrentUser`, never from the request body.
 - Records mirror table rows (snake_case columns map to camelCase components); list queries take optional

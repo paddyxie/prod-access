@@ -26,15 +26,17 @@ class RunController {
         this.tasks = tasks;
     }
 
-    record Submit(String taskId, Integer version, Map<String, Object> params, String confirmClient) {}
+    record Submit(String taskId, Integer version, Map<String, Object> params) {}
 
-    record AdHoc(String clientId, String script, Map<String, Object> params, String confirmClient) {}
+    record AdHoc(String script, Map<String, Object> params) {}
+
+    record Call(String toolId, Map<String, Object> request) {}
 
     @GetMapping
-    List<Run> list(@RequestParam(required = false) RunStatus status, @RequestParam(required = false) String taskId,
-                   @RequestParam(required = false) String clientId, @RequestParam(required = false) String submittedBy,
+    List<Run> list(@RequestParam(required = false) RunStatus status, @RequestParam(required = false) RunKind kind,
+                   @RequestParam(required = false) String taskId, @RequestParam(required = false) String submittedBy,
                    @RequestParam(defaultValue = "100") int limit) {
-        return runs.list(new RunService.Filter(status, taskId, clientId, submittedBy), limit);
+        return runs.list(new RunService.Filter(status, kind, taskId, submittedBy), limit);
     }
 
     @GetMapping("/{id}")
@@ -47,32 +49,28 @@ class RunController {
         return runs.events(id, after);
     }
 
-    @GetMapping("/{id}/api-calls")
-    List<ApiCallRecord> apiCalls(@PathVariable String id) {
-        return runs.apiCalls(id);
+    @GetMapping("/{id}/tool-calls")
+    List<ToolCallRecord> toolCalls(@PathVariable String id) {
+        return runs.toolCalls(id);
     }
 
     @PostMapping
     Run submit(@RequestBody Submit in) {
-        return runs.submit(in.taskId(), in.version(), in.params(), in.confirmClient(), CurrentUser.get());
+        return runs.submit(in.taskId(), in.version(), in.params(), CurrentUser.get());
     }
 
     /** Ad-hoc script: becomes an unnamed task (can be named later) and is run through the same path. */
     @PostMapping("/adhoc")
     Run adhoc(@RequestBody AdHoc in) {
         String actor = CurrentUser.get();
-        TaskVersion v = tasks.create(new SaveInput(null, in.clientId(), in.script()), actor);
-        return runs.submit(v.taskId(), v.ver(), in.params(), in.confirmClient(), actor);
+        TaskVersion v = tasks.create(new SaveInput(null, in.script()), actor);
+        return runs.submit(v.taskId(), v.ver(), in.params(), actor);
     }
 
-    @PostMapping("/{id}/approve")
-    Run approve(@PathVariable String id) {
-        return runs.approve(id, CurrentUser.get());
-    }
-
-    @PostMapping("/{id}/reject")
-    Run reject(@PathVariable String id, @RequestBody(required = false) Map<String, String> body) {
-        return runs.reject(id, body == null ? null : body.get("reason"), CurrentUser.get());
+    /** One tool called directly; returns when the call has finished. */
+    @PostMapping("/call")
+    Run call(@RequestBody Call in) {
+        return runs.call(in.toolId(), in.request(), CurrentUser.get());
     }
 
     @PostMapping("/{id}/cancel")

@@ -3,7 +3,7 @@ import { Button } from '@mui/material';
 import { Link as RouterLink } from 'react-router';
 import { api } from '../../api';
 import { ListPage } from '../../components/layout';
-import { clientOptions, statusOptions, taskOptions } from '../../lib/options';
+import { kindOptions, statusOptions, taskOptions } from '../../lib/options';
 import { runColumns } from '../../components/run/runColumns';
 
 export function RunListPage() {
@@ -18,7 +18,7 @@ export function RunListPage() {
       filters={[
         { name: 'status', label: 'Status', options: statusOptions },
         { name: 'taskId', label: 'Task', options: taskOptions },
-        { name: 'clientId', label: 'Client', options: clientOptions },
+        { name: 'kind', label: 'Kind', options: kindOptions },
         { name: 'submittedBy', label: 'Submitted by' },
       ]}
       load={(f) => api.runs.list(f)}

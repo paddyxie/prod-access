@@ -1,4 +1,4 @@
-import { MenuItem, TextField } from '@mui/material';
+import { TextField } from '@mui/material';
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { api } from '../../api';
@@ -14,12 +14,9 @@ export default async function main(ctx) {
 
 export function AdHocRunFormPage() {
   const navigate = useNavigate();
-  const clients = useResource('clients', () => api.clients.list());
-  const apis = useResource('apis', () => api.apis.list());
-  const [clientId, setClientId] = useState('');
+  const tools = useResource('tools', () => api.tools.list());
   const [script, setScript] = useState(TEMPLATE);
   const [params, setParams] = useState('{}');
-  const [confirm, setConfirm] = useState('');
 
   const submit = async () => {
     let parsed: unknown;
@@ -28,7 +25,7 @@ export function AdHocRunFormPage() {
     } catch {
       throw new Error('Parameters must be valid JSON');
     }
-    const run = await api.runs.adhoc(clientId, script, parsed, confirm);
+    const run = await api.runs.adhoc(script, parsed);
     navigate(`/runs/${run.id}`);
   };
 
@@ -36,21 +33,13 @@ export function AdHocRunFormPage() {
     <FormPage
       back={{ to: '/runs', label: 'Runs' }}
       title="Run an ad-hoc script"
-      subtitle="Runs once, as the chosen client. Scripts that write data need someone else's approval before they run."
-      submitLabel="Submit"
+      subtitle="Runs once in the sandbox. Your teams must own every role whose tools the script calls."
+      submitLabel="Run"
       onSubmit={submit}
-      loading={!clients.data}
+      loading={!tools.data}
     >
-      <TextField select required label="Client" value={clientId} onChange={(e) => setClientId(e.target.value)}>
-        {clients.data?.map((c) => (
-          <MenuItem key={c.id} value={c.id} disabled={!c.enabled}>
-            {c.name} ({c.environment})
-          </MenuItem>
-        ))}
-      </TextField>
-      <CodeEditor value={script} onChange={setScript} apis={apis.data} />
+      <CodeEditor value={script} onChange={setScript} tools={tools.data} />
       <TextField label="Parameters (JSON)" value={params} onChange={(e) => setParams(e.target.value)} multiline minRows={2} slotProps={{ htmlInput: { style: { fontFamily: 'monospace' } } }} />
-      <TextField label="Confirm client name" helperText="Required when the script writes data: type the client name." value={confirm} onChange={(e) => setConfirm(e.target.value)} />
     </FormPage>
   );
 }

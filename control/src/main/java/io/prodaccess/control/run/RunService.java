@@ -1,22 +1,28 @@
 package io.prodaccess.control.run;
 
 import static io.prodaccess.control.run.RunStatus.CANCELLED;
-import static io.prodaccess.control.run.RunStatus.PENDING_APPROVAL;
+import static io.prodaccess.control.run.RunStatus.FAILED;
 import static io.prodaccess.control.run.RunStatus.QUEUED;
-import static io.prodaccess.control.run.RunStatus.REJECTED;
 import static io.prodaccess.control.run.RunStatus.RUNNING;
+import static io.prodaccess.control.run.RunStatus.SUCCEEDED;
 
 import io.prodaccess.common.json.Json;
 import io.prodaccess.common.param.ParamValidator;
-import io.prodaccess.control.apicatalog.ApiCatalogService;
+import io.prodaccess.common.protocol.RunEvent;
+import io.prodaccess.common.tool.ToolRequest;
+import io.prodaccess.common.tool.ToolResponse;
+import io.prodaccess.common.tool.Tools;
 import io.prodaccess.control.audit.AuditService;
-import io.prodaccess.control.client.Client;
-import io.prodaccess.control.client.ClientService;
+import io.prodaccess.control.config.ProdAccessProperties;
 import io.prodaccess.control.jdbc.SqlWhere;
+import io.prodaccess.control.ownership.OwnershipService;
 import io.prodaccess.control.task.TaskService;
 import io.prodaccess.control.task.TaskVersion;
+import io.prodaccess.control.tool.Tool;
+import io.prodaccess.control.tool.ToolService;
 import io.prodaccess.control.web.ApiException;
-import java.util.Collections;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -26,34 +32,36 @@ import org.springframework.stereotype.Service;
 
 /**
  * Run lifecycle (see {@link RunStatus}). Every transition is a compare-and-set on the status so concurrent actors
- * and pods cannot double-apply it.
+ * and pods cannot double-apply it. A user may start a run only when their teams own every role it calls.
  */
 @Service
 public class RunService {
-    private static final String SELECT_RUN = """
-            SELECT r.*, t.name AS task_name, c.name AS client_name
-            FROM runs r JOIN tasks t ON t.id = r.task_id JOIN clients c ON c.id = r.client_id""";
+    private static final String SELECT_RUN = "SELECT r.*, t.name AS task_name FROM runs r LEFT JOIN tasks t ON t.id = r.task_id";
 
     private final JdbcClient db;
     private final TaskService tasks;
-    private final ClientService clients;
-    private final ApiCatalogService catalog;
+    private final ToolService tools;
+    private final OwnershipService ownership;
+    private final ProdAccessProperties props;
     private final AuditService audit;
 
-    RunService(JdbcClient db, TaskService tasks, ClientService clients, ApiCatalogService catalog, AuditService audit) {
+    RunService(JdbcClient db, TaskService tasks, ToolService tools, OwnershipService ownership, ProdAccessProperties props,
+               AuditService audit) {
         this.db = db;
         this.tasks = tasks;
-        this.clients = clients;
-        this.catalog = catalog;
+        this.tools = tools;
+        this.ownership = ownership;
+        this.props = props;
         this.audit = audit;
     }
 
-    public record Filter(RunStatus status, String taskId, String clientId, String submittedBy) {}
+    public record Filter(RunStatus status, RunKind kind, String taskId, String submittedBy) {}
 
     public List<Run> list(Filter f, int limit) {
         int n = Math.min(Math.max(limit, 1), 500);
         SqlWhere where = new SqlWhere().eq("r.status", f.status() == null ? null : f.status().name())
-                .eq("r.task_id", f.taskId()).eq("r.client_id", f.clientId()).eq("r.submitted_by", f.submittedBy());
+                .eq("r.kind", f.kind() == null ? null : f.kind().name())
+                .eq("r.task_id", f.taskId()).eq("r.submitted_by", f.submittedBy());
         return db.sql(SELECT_RUN + where.sql() + " ORDER BY r.created_at DESC LIMIT " + n).params(where.params())
                 .query(Run.class).list();
     }
@@ -68,84 +76,97 @@ public class RunService {
                 .params(runId, after).query(RunLogEntry.class).list();
     }
 
-    public List<ApiCallRecord> apiCalls(String runId) {
-        return db.sql("SELECT * FROM api_call_audit WHERE run_id = ? ORDER BY id").param(runId).query(ApiCallRecord.class).list();
+    public List<ToolCallRecord> toolCalls(String runId) {
+        return db.sql("SELECT * FROM tool_call_audit WHERE run_id = ? ORDER BY id").param(runId).query(ToolCallRecord.class).list();
     }
 
+    /** Queues a task version; the dispatcher runs it in a child process. */
     @SuppressWarnings("unchecked")
-    public Run submit(String taskId, Integer ver, Map<String, Object> params, String confirmClient, String actor) {
+    public Run submit(String taskId, Integer ver, Map<String, Object> params, String actor) {
         TaskVersion v = tasks.version(taskId, ver);
-        Client client = clients.get(v.clientId());
-        if (!client.enabled()) throw ApiException.conflict("client '" + client.name() + "' is disabled");
-
         Map<String, Object> coerced = ParamValidator.validate((Map<String, Object>) Json.readTree(v.paramsJson()), params);
-        // Decided once, from the API list as it is now, and kept with the run: a later reclassification never
-        // lifts the approval requirement from a run that already has it.
-        boolean writes = !Collections.disjoint(v.ops(), catalog.writeOps());
-        if (writes && !client.name().equals(confirmClient)) {
-            throw ApiException.bad("this task writes data as client '" + client.name() + "' (" + client.environment()
-                    + "); type the client name to confirm");
-        }
+        requireOwner(actor, v.roles(), "task " + taskId + " v" + v.ver());
         String id = UUID.randomUUID().toString();
-        RunStatus status = writes ? PENDING_APPROVAL : QUEUED;
         db.sql("""
-                INSERT INTO runs (id, task_id, ver, client_id, params_json, submitted_by, status, approval_hash,
-                                  requires_approval, created_at, cancel_requested) VALUES (?,?,?,?,?,?,?,?,?,?,FALSE)""")
-                .params(id, taskId, v.ver(), v.clientId(), Json.write(coerced), actor, status.name(),
-                        approvalHash(v.scriptHash(), coerced, v.clientId(), v.ops()), writes, System.currentTimeMillis())
+                INSERT INTO runs (id, kind, task_id, ver, roles_json, params_json, submitted_by, status, created_at, cancel_requested)
+                VALUES (?,?,?,?,?,?,?,?,?,FALSE)""")
+                .params(id, RunKind.SCRIPT.name(), taskId, v.ver(), Json.write(v.roles()), Json.write(coerced), actor, QUEUED.name(),
+                        System.currentTimeMillis())
                 .update();
-        audit.record(actor, "run.submit", id, "task=" + taskId + " v" + v.ver() + " status=" + status);
+        audit.record(actor, "run.submit", id, "task=" + taskId + " v" + v.ver() + " roles=" + v.roles());
         return get(id);
     }
 
-    public Run approve(String runId, String actor) {
-        Run r = get(runId);
-        if (r.status() != PENDING_APPROVAL) throw ApiException.conflict("run is " + r.status());
-        if (r.submittedBy().equals(actor)) throw ApiException.forbidden("a run must be approved by someone other than its submitter");
-        TaskVersion v = tasks.version(r.taskId(), r.ver());
-        if (!approvalHash(v, r).equals(r.approvalHash())) throw ApiException.conflict("run content changed since submission");
-        if (db.sql("UPDATE runs SET status = ?, approved_by = ? WHERE id = ? AND status = ?")
-                .params(QUEUED.name(), actor, runId, PENDING_APPROVAL.name()).update() == 0) {
-            throw ApiException.conflict("run is no longer pending approval");
-        }
-        audit.record(actor, "run.approve", runId, "hash=" + r.approvalHash());
-        return get(runId);
-    }
+    /**
+     * Calls one tool right away from this process and records it as a run: no script runs, so no sandbox or child
+     * process is needed. {@code request} has the shape a script passes: {@code {path, query, headers, body}}.
+     */
+    public Run call(String toolId, Map<String, Object> request, String actor) {
+        Tool tool = tools.get(toolId);
+        requireOwner(actor, Set.of(tool.role()), "tool " + tool.key());
+        Map<String, Object> req = request == null ? Map.of() : request;
+        String id = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        db.sql("""
+                INSERT INTO runs (id, kind, tool_key, roles_json, params_json, submitted_by, status, created_at, started_at, cancel_requested)
+                VALUES (?,?,?,?,?,?,?,?,?,FALSE)""")
+                .params(id, RunKind.CALL.name(), tool.key(), Json.write(List.of(tool.role())), Json.write(req), actor, RUNNING.name(), now, now)
+                .update();
+        audit.record(actor, "run.call", id, tool.key());
 
-    public Run reject(String runId, String reason, String actor) {
-        Run r = get(runId);
-        if (db.sql("UPDATE runs SET status = ?, finished_at = ?, error = ? WHERE id = ? AND status = ?")
-                .params(REJECTED.name(), System.currentTimeMillis(), "rejected by " + actor + (reason == null ? "" : ": " + reason),
-                        runId, PENDING_APPROVAL.name()).update() == 0) {
-            throw ApiException.conflict("run is " + r.status());
+        long t0 = System.nanoTime();
+        try {
+            ToolResponse r = new Tools(props.apiForge().toSpec(), id, actor).call(tool.def(), ToolRequest.from(req));
+            String err = r.ok() ? null : "HTTP " + r.status();
+            recordToolCall(id, RunEvent.tool(tool.def(), r.status(), (System.nanoTime() - t0) / 1_000_000, err));
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("status", r.status());
+            result.put("body", r.value());
+            finish(id, r.ok() ? SUCCEEDED : FAILED, Json.write(result), err);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            finish(id, FAILED, null, "interrupted");
+        } catch (Exception e) {
+            String err = e.getClass().getSimpleName() + ": " + e.getMessage();
+            recordToolCall(id, RunEvent.tool(tool.def(), null, (System.nanoTime() - t0) / 1_000_000, err));
+            finish(id, FAILED, null, err);
         }
-        audit.record(actor, "run.reject", runId, reason);
-        return get(runId);
+        return get(id);
     }
 
     public Run cancel(String runId, String actor) {
         Run r = get(runId);
-        long now = System.currentTimeMillis();
-        int n = db.sql("UPDATE runs SET status = ?, finished_at = ?, error = 'cancelled' WHERE id = ? AND status IN (?, ?)")
-                .params(CANCELLED.name(), now, runId, PENDING_APPROVAL.name(), QUEUED.name()).update();
-        if (n == 0) {
-            if (db.sql("UPDATE runs SET cancel_requested = TRUE WHERE id = ? AND status = ?").params(runId, RUNNING.name()).update() == 0) {
-                throw ApiException.conflict("run is " + r.status());
-            }
+        int n = db.sql("UPDATE runs SET status = ?, finished_at = ?, error = 'cancelled' WHERE id = ? AND status = ?")
+                .params(CANCELLED.name(), System.currentTimeMillis(), runId, QUEUED.name()).update();
+        if (n == 0 && (r.kind() != RunKind.SCRIPT
+                || db.sql("UPDATE runs SET cancel_requested = TRUE WHERE id = ? AND status = ?").params(runId, RUNNING.name()).update() == 0)) {
+            throw ApiException.conflict("run is " + r.status());
         }
         audit.record(actor, "run.cancel", runId, r.status().name());
         return get(runId);
     }
 
-    // ---- approval binding
-
-    /** What an approver actually approves: the code version, the exact inputs, the Client identity and the operation set. */
-    static String approvalHash(String scriptHash, Map<String, Object> params, String clientId, Set<String> ops) {
-        return TaskService.sha256(Json.writeCanonical(Map.of("script", scriptHash, "params", params, "client", clientId, "ops", ops)));
+    /** Settles a RUNNING run; a no-op if something else (a sweep, a cancel) settled it first. */
+    boolean finish(String runId, RunStatus status, String resultJson, String error) {
+        return db.sql("UPDATE runs SET status = ?, finished_at = ?, result_json = ?, error = ? WHERE id = ? AND status = 'RUNNING'")
+                .params(status.name(), System.currentTimeMillis(), resultJson, error, runId).update() > 0;
     }
 
-    @SuppressWarnings("unchecked")
-    static String approvalHash(TaskVersion v, Run r) {
-        return approvalHash(v.scriptHash(), (Map<String, Object>) Json.readTree(r.paramsJson()), r.clientId(), v.ops());
+    void recordToolCall(String runId, RunEvent ev) {
+        db.sql("""
+                INSERT INTO tool_call_audit (run_id, ts, role, tool, type, method, path, status, duration_ms, error)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""")
+                .params(runId, ev.ts(), ev.role(), ev.tool(), ev.type().name(), ev.method(), ev.path(), ev.status(), ev.ms(),
+                        ev.err() == null ? null : ev.err().substring(0, Math.min(500, ev.err().length())))
+                .update();
+    }
+
+    private void requireOwner(String actor, Collection<String> roles, String target) {
+        try {
+            ownership.requireOwner(actor, roles);
+        } catch (ApiException e) {
+            audit.record(actor, "run.refused", target, e.getMessage());
+            throw e;
+        }
     }
 }

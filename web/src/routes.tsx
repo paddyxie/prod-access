@@ -1,10 +1,5 @@
 import { createBrowserRouter, Navigate } from 'react-router';
 import { AppShell } from './components/layout/AppShell';
-import { ApiFormPage } from './pages/apis/ApiFormPage';
-import { ApiListPage } from './pages/apis/ApiListPage';
-import { ApprovalListPage } from './pages/approvals/ApprovalListPage';
-import { ClientFormPage } from './pages/clients/ClientFormPage';
-import { ClientListPage } from './pages/clients/ClientListPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { AdHocRunFormPage } from './pages/runs/AdHocRunFormPage';
 import { RunDetailPage } from './pages/runs/RunDetailPage';
@@ -13,6 +8,9 @@ import { TaskDetailPage } from './pages/tasks/TaskDetailPage';
 import { TaskFormPage } from './pages/tasks/TaskFormPage';
 import { TaskListPage } from './pages/tasks/TaskListPage';
 import { TaskRunFormPage } from './pages/tasks/TaskRunFormPage';
+import { ToolCallFormPage } from './pages/tools/ToolCallFormPage';
+import { ToolFormPage } from './pages/tools/ToolFormPage';
+import { ToolListPage } from './pages/tools/ToolListPage';
 
 // URL scheme: /<section> list · /<section>/new create · /<section>/:id detail · /<section>/:id/edit edit.
 export const router = createBrowserRouter([
@@ -23,18 +21,15 @@ export const router = createBrowserRouter([
       { path: 'runs', element: <RunListPage /> },
       { path: 'runs/new', element: <AdHocRunFormPage /> },
       { path: 'runs/:id', element: <RunDetailPage /> },
-      { path: 'approvals', element: <ApprovalListPage /> },
       { path: 'tasks', element: <TaskListPage /> },
       { path: 'tasks/new', element: <TaskFormPage /> },
       { path: 'tasks/:id', element: <TaskDetailPage /> },
       { path: 'tasks/:id/edit', element: <TaskFormPage /> },
       { path: 'tasks/:id/run', element: <TaskRunFormPage /> },
-      { path: 'clients', element: <ClientListPage /> },
-      { path: 'clients/new', element: <ClientFormPage /> },
-      { path: 'clients/:id/edit', element: <ClientFormPage /> },
-      { path: 'apis', element: <ApiListPage /> },
-      { path: 'apis/new', element: <ApiFormPage /> },
-      { path: 'apis/:id/edit', element: <ApiFormPage /> },
+      { path: 'tools', element: <ToolListPage /> },
+      { path: 'tools/new', element: <ToolFormPage /> },
+      { path: 'tools/:id/edit', element: <ToolFormPage /> },
+      { path: 'tools/:id/call', element: <ToolCallFormPage /> },
       { path: '*', element: <NotFoundPage /> },
     ],
   },

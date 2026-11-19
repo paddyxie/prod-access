@@ -7,9 +7,7 @@ plugins {
 
 dependencies {
     implementation(project(":common"))
-    implementation(libs.graalvm.polyglot)
-    implementation(libs.graalvm.js.language)
-    implementation(libs.graalvm.truffle.runtime)
+    implementation(libs.quickjs4j)
 }
 
 application {
@@ -18,5 +16,4 @@ application {
 
 tasks.shadowJar {
     archiveFileName = "runner.jar"
-    mergeServiceFiles() // Truffle registers languages through META-INF/services
 }

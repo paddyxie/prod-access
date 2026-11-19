@@ -6,12 +6,14 @@ import { api, type TaskVersion } from '../../api';
 import { CodeEditor } from '../../components/CodeEditor';
 import { DataTable, DetailPage, Fields, Section } from '../../components/layout';
 import { runColumns } from '../../components/run/runColumns';
-import { AccessChip } from '../../components/StatusChip';
+import { RoleChip } from '../../components/StatusChip';
+import { useCurrentUser } from '../../hooks/useCurrentUser';
 import { useResource } from '../../hooks/useResource';
 import { formatTime } from '../../lib/format';
 
 export function TaskDetailPage() {
   const { id = '' } = useParams();
+  const me = useCurrentUser();
   const task = useResource(`task:${id}`, () => api.tasks.get(id));
   const versions = useResource(`task-versions:${id}`, () => api.tasks.versions(id));
   const runs = useResource(`task-runs:${id}`, () => api.runs.list({ taskId: id, limit: 10 }), 5000);
@@ -24,7 +26,7 @@ export function TaskDetailPage() {
       back={{ to: '/tasks', label: 'Tasks' }}
       title={t?.name ?? 'Task'}
       subtitle={typeof meta?.title === 'string' ? meta.title : undefined}
-      status={t && <AccessChip access={t.hasWrite ? 'WRITE' : 'READ'} />}
+      status={t?.roles.map((r) => <RoleChip key={r} role={r} owned={!!me?.ownedRoles.includes(r)} />)}
       loading={!t && !task.error}
       error={task.error}
       actions={
@@ -43,9 +45,8 @@ export function TaskDetailPage() {
           <Section title="Summary">
             <Fields
               items={[
-                ['Client', t.clientName],
                 ['Latest version', `v${t.latestVersion}`],
-                ['Operations', latest && (JSON.parse(latest.opsJson) as string[]).join(', ')],
+                ['Tools', t.tools.join(', ')],
                 ['Limits', meta && ['timeout', 'rps', 'maxApiCalls'].filter((k) => meta[k] !== undefined).map((k) => `${k} ${meta[k]}`).join(' · ')],
                 ['Created by', t.createdBy],
                 ['Created', formatTime(t.createdAt)],
@@ -69,7 +70,7 @@ export function TaskDetailPage() {
             <DataTable<TaskVersion>
               columns={[
                 { header: 'Version', render: (v) => `v${v.ver}`, width: 90 },
-                { header: 'Operations', render: (v) => (JSON.parse(v.opsJson) as string[]).join(', '), mono: true },
+                { header: 'Tools', render: (v) => (JSON.parse(v.toolsJson) as string[]).join(', '), mono: true },
                 { header: 'Saved by', render: (v) => v.createdBy },
                 { header: 'Saved', render: (v) => formatTime(v.createdAt) },
               ]}

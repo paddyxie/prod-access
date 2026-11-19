@@ -22,8 +22,8 @@ class TaskController {
     }
 
     @GetMapping
-    List<Task> list(@RequestParam(required = false) String q, @RequestParam(required = false) String clientId) {
-        return tasks.list(q, clientId);
+    List<Task> list(@RequestParam(required = false) String q, @RequestParam(required = false) String role) {
+        return tasks.list(q, role);
     }
 
     @GetMapping("/{id}")

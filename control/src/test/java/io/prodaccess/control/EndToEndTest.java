@@ -14,6 +14,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -28,52 +29,67 @@ import org.springframework.test.context.DynamicPropertySource;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+/**
+ * Runs the real app against a mock target: {@code /oauth/token} and {@code /orders/...} stand in for API Forge,
+ * {@code /direct/...} for an endpoint reached by an HTTP Client tool. Team "orders-team" (alice, bob) owns role
+ * {@code orders}; carol is only in "billing-team".
+ */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class EndToEndTest {
     static final JsonMapper JSON = JsonMapper.builder().build();
     static final HttpClient HTTP = HttpClient.newHttpClient();
-    static HttpServer gateway;
-    /** "METHOD path | Authorization | X-Prod-Access-Actor" for every API call the mock gateway received. */
+    static HttpServer target;
+    /** "METHOD path | Authorization | X-Prod-Access-Actor" for every tool call the mock target received. */
     static final List<String> received = new CopyOnWriteArrayList<>();
 
     @BeforeAll
-    static void startGateway() throws IOException {
-        gateway = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        gateway.createContext("/oauth/token", ex -> {
+    static void startTarget() throws IOException {
+        target = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        target.createContext("/oauth/token", ex -> {
             String form = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            boolean ok = form.contains("client_id=cid") && form.contains("client_secret=sec");
+            boolean ok = form.contains("client_id=prod-access") && form.contains("client_secret=sec");
             byte[] b = (ok ? "{\"access_token\":\"tok-1\",\"expires_in\":300}" : "{}").getBytes();
             ex.sendResponseHeaders(ok ? 200 : 401, b.length);
             ex.getResponseBody().write(b);
             ex.close();
         });
-        gateway.createContext("/orders", ex -> {
-            ex.getRequestBody().readAllBytes();
-            received.add(ex.getRequestMethod() + " " + ex.getRequestURI().getPath() + " | "
-                    + ex.getRequestHeaders().getFirst("Authorization") + " | " + ex.getRequestHeaders().getFirst("X-Prod-Access-Actor"));
-            if (ex.getRequestURI().getPath().endsWith("/slow")) {
-                try { Thread.sleep(30_000); } catch (InterruptedException ignored) { }
-            }
-            byte[] b = ("{\"id\":\"" + ex.getRequestURI().getPath().replaceAll(".*/orders/", "").split("/")[0] + "\",\"state\":\"FAILED\"}").getBytes();
-            ex.getResponseHeaders().add("Content-Type", "application/json");
-            ex.sendResponseHeaders(200, b.length);
-            ex.getResponseBody().write(b);
-            ex.close();
-        });
-        gateway.setExecutor(java.util.concurrent.Executors.newCachedThreadPool()); // the slow endpoint must not block others
-        gateway.start();
+        for (String prefix : List.of("/orders", "/direct")) {
+            target.createContext(prefix, ex -> {
+                ex.getRequestBody().readAllBytes();
+                received.add(ex.getRequestMethod() + " " + ex.getRequestURI().getPath() + " | "
+                        + ex.getRequestHeaders().getFirst("Authorization") + " | " + ex.getRequestHeaders().getFirst("X-Prod-Access-Actor"));
+                if (ex.getRequestURI().getPath().endsWith("/slow")) {
+                    try { Thread.sleep(30_000); } catch (InterruptedException ignored) { }
+                }
+                byte[] b = ("{\"id\":\"" + ex.getRequestURI().getPath().replaceAll(".*/orders/", "").split("/")[0] + "\",\"state\":\"FAILED\"}").getBytes();
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders(200, b.length);
+                ex.getResponseBody().write(b);
+                ex.close();
+            });
+        }
+        target.setExecutor(java.util.concurrent.Executors.newCachedThreadPool()); // the slow endpoint must not block others
+        target.start();
+    }
+
+    static String base() {
+        return "http://127.0.0.1:" + target.getAddress().getPort();
     }
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry r) {
-        String base = "http://127.0.0.1:" + gateway.getAddress().getPort();
         r.add("spring.datasource.url", () -> "jdbc:h2:mem:e2e;MODE=PostgreSQL;DB_CLOSE_DELAY=-1");
-        r.add("prodaccess.gateway.base-url", () -> base);
-        r.add("prodaccess.gateway.token-url", () -> base + "/oauth/token");
+        r.add("prodaccess.api-forge.base-url", EndToEndTest::base);
+        r.add("prodaccess.api-forge.token-url", () -> base() + "/oauth/token");
+        r.add("prodaccess.api-forge.client-id", () -> "prod-access");
+        r.add("prodaccess.api-forge.client-secret", () -> "sec");
+        r.add("prodaccess.cmdb.role-owners.orders[0]", () -> "orders-team");
+        r.add("prodaccess.cmdb.role-owners.billing[0]", () -> "billing-team");
+        r.add("prodaccess.cmdb.teams.orders-team[0]", () -> "alice");
+        r.add("prodaccess.cmdb.teams.orders-team[1]", () -> "bob");
+        r.add("prodaccess.cmdb.teams.billing-team[0]", () -> "carol");
         r.add("prodaccess.runner.grace-ms", () -> "1500");
         r.add("prodaccess.runner.poll-ms", () -> "100");
-        r.add("prodaccess.credentials.test.client-id", () -> "cid");
-        r.add("prodaccess.credentials.test.client-secret", () -> "sec");
     }
 
     @LocalServerPort int port;
@@ -97,20 +113,20 @@ class EndToEndTest {
         return resp.body().isBlank() ? null : JSON.readTree(resp.body());
     }
 
-    String clientId;
+    /** Registers a tool once (as alice, an owner of the role) and returns its id. */
+    String tool(String role, String name, String type, String method, String path, String baseUrl) {
+        for (JsonNode t : call("alice", HttpMethod.GET, "/api/tools?role=" + role, null, 200)) {
+            if (t.get("name").asString().equals(name)) return t.get("id").asString();
+        }
+        Map<String, Object> in = new HashMap<>(Map.of("role", role, "name", name, "type", type, "method", method, "pathTemplate", path));
+        if (baseUrl != null) in.put("baseUrl", baseUrl);
+        return call("alice", HttpMethod.POST, "/api/tools", in, 200).get("id").asString();
+    }
 
     void seed() {
-        if (clientId != null) return;
-        JsonNode existing = call("alice", HttpMethod.GET, "/api/clients", null, 200);
-        for (JsonNode c : existing) if (c.get("name").asString().equals("order-admin")) clientId = c.get("id").asString();
-        if (clientId != null) return;
-        {
-            clientId = call("alice", HttpMethod.POST, "/api/clients",
-                    Map.of("name", "order-admin", "environment", "PROD", "credentialRef", "test"), 200).get("id").asString();
-            call("alice", HttpMethod.POST, "/api/apis", Map.of("service", "orders", "operation", "getOrder", "method", "GET", "pathTemplate", "/orders/{id}"), 200);
-            call("alice", HttpMethod.POST, "/api/apis", Map.of("service", "orders", "operation", "replayOrder", "method", "POST", "pathTemplate", "/orders/{id}/replay"), 200);
-            call("alice", HttpMethod.POST, "/api/apis", Map.of("service", "orders", "operation", "slow", "method", "GET", "pathTemplate", "/orders/{id}/slow"), 200);
-        }
+        tool("orders", "getOrder", "API_FORGE", "GET", "/orders/{id}", null);
+        tool("orders", "slow", "API_FORGE", "GET", "/orders/{id}/slow", null);
+        tool("orders", "lookup", "HTTP_CLIENT", "GET", "/orders/{id}", base() + "/direct");
     }
 
     JsonNode awaitRun(String runId, String... terminal) {
@@ -132,13 +148,12 @@ class EndToEndTest {
         throw new AssertionError("child processes still alive: " + ProcessHandle.current().children().toList());
     }
 
-    String adhoc(String user, String script, Map<String, Object> params, String confirm, int expected) {
-        JsonNode r = call(user, HttpMethod.POST, "/api/runs/adhoc",
-                Map.of("clientId", clientId, "script", script, "params", params, "confirmClient", confirm == null ? "" : confirm), expected);
+    String adhoc(String user, String script, Map<String, Object> params, int expected) {
+        JsonNode r = call(user, HttpMethod.POST, "/api/runs/adhoc", Map.of("script", script, "params", params), expected);
         return expected == 200 ? r.get("id").asString() : null;
     }
 
-    static final String READ_TASK = """
+    static final String LOOKUP = """
             export const meta = { title: 'look up orders' };
             export const params = { ids: param.list(param.string(), { max: 5 }), note: param.string({ default: 'x' }) };
             export default async function main(ctx) {
@@ -155,123 +170,96 @@ class EndToEndTest {
     // ---- tests
 
     @Test
-    void readOnlyRunExecutesAsTheClientAndIsAudited() {
+    void scriptCallsApiForgeToolsAsProdAccessAndIsAudited() {
         seed();
-        String id = adhoc("alice", READ_TASK, Map.of("ids", "o1,o2"), null, 200);
+        String id = adhoc("alice", LOOKUP, Map.of("ids", "o1,o2"), 200);
         JsonNode run = awaitRun(id, "SUCCEEDED", "FAILED");
         assertEquals("SUCCEEDED", run.get("status").asString(), run.toString());
-        JsonNode result = parse(run.get("resultJson").asString());
+        JsonNode result = JSON.readTree(run.get("resultJson").asString());
         assertEquals(2, result.get("count").asInt());
         assertEquals("o1", result.get("first").get("id").asString());
 
-        assertTrue(received.stream().anyMatch(s -> s.equals("GET /orders/orders/o1 | Bearer tok-1 | alice")), received.toString());
-        JsonNode audit = call("alice", HttpMethod.GET, "/api/runs/" + id + "/api-calls", null, 200);
-        assertEquals(2, audit.size());
-        assertEquals("getOrder", audit.get(0).get("operation").asString());
-        assertEquals(200, audit.get(0).get("status").asInt());
+        assertTrue(received.contains("GET /orders/orders/o1 | Bearer tok-1 | alice"), received.toString());
+        JsonNode calls = call("alice", HttpMethod.GET, "/api/runs/" + id + "/tool-calls", null, 200);
+        assertEquals(2, calls.size());
+        assertEquals("getOrder", calls.get(0).get("tool").asString());
+        assertEquals("API_FORGE", calls.get(0).get("type").asString());
+        assertEquals(200, calls.get(0).get("status").asInt());
         JsonNode events = call("alice", HttpMethod.GET, "/api/runs/" + id + "/events", null, 200);
         assertTrue(events.toString().contains("lookup start") && events.toString().contains("found 2"));
         awaitNoChildren();
     }
 
     @Test
-    void writeRunNeedsConfirmationAndSomeoneElsesApproval() {
+    void httpClientToolsGoStraightToTheirEndpointWithoutTheApiForgeToken() {
         seed();
-        String script = """
-                export const params = { orderId: param.string() };
-                export default async function main(ctx) { return await api.orders.replayOrder({ path: { id: ctx.params.orderId }, body: { force: true } }); }
-                """;
-        adhoc("alice", script, Map.of("orderId", "w1"), null, 400);          // client name not typed
-        int before = received.size();
-        String id = adhoc("alice", script, Map.of("orderId", "w1"), "order-admin", 200);
-        assertEquals("PENDING_APPROVAL", call("alice", HttpMethod.GET, "/api/runs/" + id, null, 200).get("status").asString());
-        sleep(800);
-        assertEquals(before, received.size(), "nothing may reach the gateway before approval");
-
-        call("alice", HttpMethod.POST, "/api/runs/" + id + "/approve", null, 403); // self-approval refused
-        call("bob", HttpMethod.POST, "/api/runs/" + id + "/approve", null, 200);
+        String id = adhoc("bob", "export default async function main() { return await api.orders.lookup({ path: { id: 'h1' } }); }", Map.of(), 200);
         JsonNode run = awaitRun(id, "SUCCEEDED", "FAILED");
         assertEquals("SUCCEEDED", run.get("status").asString(), run.toString());
-        assertEquals("bob", run.get("approvedBy").asString());
-        assertTrue(received.stream().anyMatch(s -> s.startsWith("POST /orders/orders/w1/replay")));
-        call("bob", HttpMethod.POST, "/api/runs/" + id + "/approve", null, 409);   // not approvable twice
-        awaitNoChildren();
+        assertTrue(received.contains("GET /direct/orders/h1 | null | bob"), received.toString());
+        assertEquals("HTTP_CLIENT", call("bob", HttpMethod.GET, "/api/runs/" + id + "/tool-calls", null, 200).get(0).get("type").asString());
     }
 
     @Test
-    void readWriteComesFromTheLiveApiListButASubmittedRunKeepsItsApproval() {
+    void onlyTeamsThatOwnTheRoleMayRunOrEditItsTools() {
         seed();
-        Map<String, Object> archive = new java.util.HashMap<>(Map.of("service", "orders", "operation", "archive", "method", "POST", "pathTemplate", "/orders/{id}/archive"));
-        call("alice", HttpMethod.POST, "/api/apis", archive, 200);
-        String script = "export default async function main() { return await api.orders.archive({ path: { id: 'a1' } }); }";
-        String taskId = call("alice", HttpMethod.POST, "/api/tasks", Map.of("name", "archive", "clientId", clientId, "script", script), 200)
-                .get("taskId").asString();
-        assertTrue(call("alice", HttpMethod.GET, "/api/tasks/" + taskId, null, 200).get("hasWrite").asBoolean());
-        String pending = call("alice", HttpMethod.POST, "/api/runs", Map.of("taskId", taskId, "params", Map.of(), "confirmClient", "order-admin"), 200)
-                .get("id").asString();
-
-        archive.put("access", "READ");
-        call("alice", HttpMethod.POST, "/api/apis", archive, 200);
-
-        // The task follows the list immediately, without saving a new version...
-        assertFalse(call("alice", HttpMethod.GET, "/api/tasks/" + taskId, null, 200).get("hasWrite").asBoolean());
-        JsonNode fresh = call("alice", HttpMethod.POST, "/api/runs", Map.of("taskId", taskId, "params", Map.of()), 200);
-        assertEquals("QUEUED", fresh.get("status").asString());
-        assertFalse(fresh.get("requiresApproval").asBoolean());
-        // ...but the run submitted while it was WRITE still needs someone else's approval.
-        JsonNode run = call("alice", HttpMethod.GET, "/api/runs/" + pending, null, 200);
-        assertEquals("PENDING_APPROVAL", run.get("status").asString());
-        assertTrue(run.get("requiresApproval").asBoolean());
-        call("alice", HttpMethod.POST, "/api/runs/" + pending + "/approve", null, 403);
-        call("alice", HttpMethod.POST, "/api/runs/" + pending + "/cancel", null, 200);
-        awaitRun(fresh.get("id").asString(), "SUCCEEDED", "FAILED");
+        int before = received.size();
+        adhoc("carol", LOOKUP, Map.of("ids", "c1"), 403);
+        assertEquals(before, received.size(), "a refused run never reaches the target");
+        call("carol", HttpMethod.POST, "/api/tools",
+                Map.of("role", "orders", "name", "sneaky", "type", "API_FORGE", "method", "POST", "pathTemplate", "/x"), 403);
+        JsonNode me = call("carol", HttpMethod.GET, "/api/me", null, 200);
+        assertEquals("billing-team", me.get("teams").get(0).asString());
     }
 
     @Test
-    void rejectedRunNeverExecutes() {
+    void aSingleToolCallRunsDirectlyAndIsRecordedAsARun() {
         seed();
-        String script = "export default async function main() { return await api.orders.replayOrder({ path: { id: 'rej' } }); }";
-        String id = adhoc("alice", script, Map.of(), "order-admin", 200);
-        call("bob", HttpMethod.POST, "/api/runs/" + id + "/reject", Map.of("reason", "no"), 200);
-        assertEquals("REJECTED", call("alice", HttpMethod.GET, "/api/runs/" + id, null, 200).get("status").asString());
-        sleep(500);
-        assertFalse(received.stream().anyMatch(s -> s.contains("/orders/rej/")));
+        String toolId = tool("orders", "getOrder", "API_FORGE", "GET", "/orders/{id}", null);
+        JsonNode run = call("bob", HttpMethod.POST, "/api/runs/call", Map.of("toolId", toolId, "request", Map.of("path", Map.of("id", "d1"))), 200);
+        assertEquals("CALL", run.get("kind").asString());
+        assertEquals("SUCCEEDED", run.get("status").asString(), run.toString());
+        assertEquals("orders.getOrder", run.get("toolKey").asString());
+        JsonNode result = JSON.readTree(run.get("resultJson").asString());
+        assertEquals(200, result.get("status").asInt());
+        assertEquals("d1", result.get("body").get("id").asString());
+        assertTrue(received.contains("GET /orders/orders/d1 | Bearer tok-1 | bob"), received.toString());
+        assertEquals(1, call("bob", HttpMethod.GET, "/api/runs/" + run.get("id").asString() + "/tool-calls", null, 200).size());
+
+        call("carol", HttpMethod.POST, "/api/runs/call", Map.of("toolId", toolId, "request", Map.of("path", Map.of("id", "d2"))), 403);
     }
 
     @Test
-    void scriptsCannotUseOperationsOutsideTheApiListOrHideApiAccess() {
+    void scriptsCannotUseToolsOutsideTheRegistryOrHideApiAccess() {
         seed();
-        adhoc("alice", "export default async function main() { return api.orders.nope({}); }", Map.of(), null, 400);
-        adhoc("alice", "export default async function main() { const a = api; return a.orders.getOrder({}); }", Map.of(), null, 400);
-        adhoc("alice", "export default async function main() { return api['orders']['replayOrder']({}); }", Map.of(), null, 400);
+        adhoc("alice", "export default async function main() { return api.orders.nope({}); }", Map.of(), 400);
+        adhoc("alice", "export default async function main() { const a = api; return a.orders.getOrder({}); }", Map.of(), 400);
+        adhoc("alice", "export default async function main() { return api['orders']['getOrder']({}); }", Map.of(), 400);
     }
 
     @Test
     void invalidParamsAreReportedPerField() {
         seed();
-        JsonNode r = call("alice", HttpMethod.POST, "/api/runs/adhoc",
-                Map.of("clientId", clientId, "script", READ_TASK, "params", Map.of("ids", "a,b,c,d,e,f"), "confirmClient", ""), 400);
+        JsonNode r = call("alice", HttpMethod.POST, "/api/runs/adhoc", Map.of("script", LOOKUP, "params", Map.of("ids", "a,b,c,d,e,f")), 400);
         assertNotNull(r.get("fields").get("ids"));
     }
 
     @Test
     void runawayScriptIsTimedOutAndItsProcessIsGone() {
-        seed();
         String script = """
                 export const meta = { timeout: '2s' };
                 export default async function main() { while (true) {} }
                 """;
-        String id = adhoc("alice", script, Map.of(), null, 200);
+        String id = adhoc("alice", script, Map.of(), 200);
         JsonNode run = awaitRun(id, "TIMED_OUT", "FAILED", "SUCCEEDED");
         assertEquals("TIMED_OUT", run.get("status").asString(), run.toString());
         awaitNoChildren();
     }
 
     @Test
-    void cancelKillsARunBlockedInsideAnApiCall() {
+    void cancelKillsARunBlockedInsideAToolCall() {
         seed();
-        String script = "export default async function main() { return await api.orders.slow({ path: { id: 's1' } }); }";
-        String id = adhoc("alice", script, Map.of(), null, 200);
+        String id = adhoc("alice", "export default async function main() { return await api.orders.slow({ path: { id: 's1' } }); }", Map.of(), 200);
         awaitRun(id, "RUNNING");
         sleep(1500);
         call("alice", HttpMethod.POST, "/api/runs/" + id + "/cancel", null, 200);
@@ -282,36 +270,26 @@ class EndToEndTest {
 
     @Test
     void sandboxHasNoWayOut() {
-        seed();
         String script = """
                 export default async function main() {
-                  const out = {};
-                  for (const [k, f] of Object.entries({
-                    hostClass: () => Java.type('java.lang.System').getenv('HOME'),
-                    file: () => Java.type('java.io.File'),
-                    importFs: () => import('/etc/passwd'),
-                  })) { try { await f(); out[k] = 'REACHED'; } catch (e) { out[k] = 'blocked'; } }
-                  out.globals = [typeof process, typeof require, typeof fetch, typeof XMLHttpRequest, typeof setTimeout].join(',');
-                  return out;
+                  return [typeof Javy, typeof eval, typeof __host, typeof fetch, typeof require, typeof process,
+                          typeof setTimeout, typeof std, typeof os, typeof Java].join(',');
                 }
                 """;
-        JsonNode run = awaitRun(adhoc("alice", script, Map.of(), null, 200), "SUCCEEDED", "FAILED");
-        JsonNode out = parse(run.get("resultJson").asString());
-        assertEquals("blocked", out.get("hostClass").asString());
-        assertEquals("blocked", out.get("file").asString());
-        assertEquals("blocked", out.get("importFs").asString());
-        assertEquals("undefined,undefined,undefined,undefined,undefined", out.get("globals").asString());
+        JsonNode run = awaitRun(adhoc("alice", script, Map.of(), 200), "SUCCEEDED", "FAILED");
+        assertEquals("\"undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined\"",
+                run.get("resultJson").asString(), run.toString());
     }
 
     @Test
     void namedTasksAreVersionedAndPausingStopsDispatch() {
         seed();
-        JsonNode v1 = call("alice", HttpMethod.POST, "/api/tasks", Map.of("name", "lookup", "clientId", clientId, "script", READ_TASK), 200);
+        JsonNode v1 = call("alice", HttpMethod.POST, "/api/tasks", Map.of("name", "lookup", "script", LOOKUP), 200);
         String taskId = v1.get("taskId").asString();
-        JsonNode v2 = call("alice", HttpMethod.POST, "/api/tasks/" + taskId + "/versions",
-                Map.of("clientId", clientId, "script", READ_TASK + "\n// v2"), 200);
+        JsonNode v2 = call("alice", HttpMethod.POST, "/api/tasks/" + taskId + "/versions", Map.of("script", LOOKUP + "\n// v2"), 200);
         assertEquals(2, v2.get("ver").asInt());
-        call("alice", HttpMethod.POST, "/api/tasks", Map.of("name", "lookup", "clientId", clientId, "script", READ_TASK), 409);
+        call("alice", HttpMethod.POST, "/api/tasks", Map.of("name", "lookup", "script", LOOKUP), 409);
+        assertEquals("orders", call("alice", HttpMethod.GET, "/api/tasks/" + taskId, null, 200).get("roles").get(0).asString());
 
         call("alice", HttpMethod.POST, "/api/admin/pause", Map.of("paused", true), 200);
         String id = call("alice", HttpMethod.POST, "/api/runs", Map.of("taskId", taskId, "params", Map.of("ids", "p1")), 200).get("id").asString();
@@ -322,12 +300,20 @@ class EndToEndTest {
     }
 
     @Test
-    void disabledClientBlocksSubmission() {
-        seed();
-        String other = call("alice", HttpMethod.POST, "/api/clients",
-                Map.of("name", "disabled-one", "credentialRef", "test", "enabled", false), 200).get("id").asString();
-        call("alice", HttpMethod.POST, "/api/runs/adhoc",
-                Map.of("clientId", other, "script", READ_TASK, "params", Map.of("ids", "a")), 409);
+    void aToolRemovedWhileQueuedFailsTheRunBeforeItStarts() {
+        String toolId = tool("orders", "temp", "API_FORGE", "GET", "/orders/{id}", null);
+        call("alice", HttpMethod.POST, "/api/admin/pause", Map.of("paused", true), 200);
+        String id;
+        try {
+            id = adhoc("alice", "export default async function main() { return api.orders.temp({ path: { id: 't1' } }); }", Map.of(), 200);
+            call("alice", HttpMethod.DELETE, "/api/tools/" + toolId, null, 200);
+        } finally {
+            call("alice", HttpMethod.POST, "/api/admin/pause", Map.of("paused", false), 200);
+        }
+        JsonNode run = awaitRun(id, "FAILED", "SUCCEEDED");
+        assertEquals("FAILED", run.get("status").asString());
+        assertTrue(run.get("error").asString().contains("removed from the registry"), run.toString());
+        assertFalse(received.stream().anyMatch(s -> s.contains("/t1")));
     }
 
     @Test
@@ -341,11 +327,11 @@ class EndToEndTest {
         }
     }
 
-    static JsonNode parse(String s) {
-        return JSON.readTree(s);
-    }
-
     static void sleep(long ms) {
-        try { Thread.sleep(ms); } catch (InterruptedException e) { throw new IllegalStateException(e); }
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

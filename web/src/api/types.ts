@@ -1,32 +1,32 @@
 // Shapes of the control app's REST API (records under io.prodaccess.control.*).
 
-export type Access = 'READ' | 'WRITE';
+export const TOOL_TYPES = ['API_FORGE', 'HTTP_CLIENT'] as const;
+export type ToolType = (typeof TOOL_TYPES)[number];
 
-export const RUN_STATUSES = [
-  'PENDING_APPROVAL', 'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'REJECTED', 'LOST',
-] as const;
+export const RUN_STATUSES = ['QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'LOST'] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
-export const ACTIVE_STATUSES: readonly RunStatus[] = ['PENDING_APPROVAL', 'QUEUED', 'RUNNING'];
+export const ACTIVE_STATUSES: readonly RunStatus[] = ['QUEUED', 'RUNNING'];
 
-export interface Client {
-  id: string;
-  name: string;
-  description: string | null;
-  environment: string;
-  credentialRef: string;
-  enabled: boolean;
-  createdBy: string;
-  createdAt: number;
+export type RunKind = 'SCRIPT' | 'CALL';
+
+export interface Me {
+  user: string;
+  teams: string[];
+  /** CMDB roles owned by any of the user's teams: their tools are the ones the user may call. */
+  ownedRoles: string[];
 }
 
-export interface ApiEntry {
+export interface Tool {
   id: string;
-  service: string;
-  operation: string;
+  role: string;
+  name: string;
+  type: ToolType;
   method: string;
   pathTemplate: string;
-  access: Access;
+  /** HTTP Client tools only. */
+  baseUrl: string | null;
+  description: string | null;
   updatedBy: string;
   updatedAt: number;
 }
@@ -37,9 +37,8 @@ export interface Task {
   createdBy: string;
   createdAt: number;
   latestVersion: number;
-  clientId: string;
-  clientName: string;
-  hasWrite: boolean;
+  tools: string[];
+  roles: string[];
   updatedBy: string;
   updatedAt: number;
 }
@@ -48,29 +47,28 @@ export interface TaskVersion {
   id: string;
   taskId: string;
   ver: number;
-  clientId: string;
   script: string;
   scriptHash: string;
   metaJson: string;
   paramsJson: string;
-  opsJson: string;
+  toolsJson: string;
   createdBy: string;
   createdAt: number;
 }
 
 export interface Run {
   id: string;
-  taskId: string;
+  kind: RunKind;
+  taskId: string | null;
   taskName: string | null;
-  ver: number;
-  clientId: string;
-  clientName: string;
+  ver: number | null;
+  /** `role.name` of the tool, for a direct call. */
+  toolKey: string | null;
+  rolesJson: string;
+  /** Task parameters, or the request of a direct call. */
   paramsJson: string;
   submittedBy: string;
   status: RunStatus;
-  /** Decided at submission from the API list of that moment; never changes afterwards. */
-  requiresApproval: boolean;
-  approvedBy: string | null;
   createdAt: number;
   startedAt: number | null;
   finishedAt: number | null;
@@ -87,11 +85,12 @@ export interface RunLogEntry {
   message: string | null;
 }
 
-export interface ApiCallRecord {
+export interface ToolCallRecord {
   id: number;
   ts: number;
-  service: string;
-  operation: string;
+  role: string;
+  tool: string;
+  type: ToolType;
   method: string;
   path: string;
   status: number | null;

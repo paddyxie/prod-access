@@ -6,7 +6,7 @@ import EditorWorker from 'monaco-editor/editor/editor.worker?worker';
 import JsonWorker from 'monaco-editor/language/json/json.worker?worker';
 import TsWorker from 'monaco-editor/language/typescript/ts.worker?worker';
 import { useEffect } from 'react';
-import type { ApiEntry } from '../api';
+import type { Tool } from '../api';
 import { sandboxDeclarations } from '../lib/sandboxTypes';
 
 // Monaco is bundled, not fetched from a CDN (the production network cannot reach one).
@@ -35,19 +35,19 @@ interface Props {
   language?: 'javascript' | 'json';
   readOnly?: boolean;
   height?: number | string;
-  /** The API list, for completion and checking of `api.<service>.<operation>`. */
-  apis?: ApiEntry[];
+  /** The tool registry, for completion and checking of `api.<role>.<tool>`. */
+  tools?: Tool[];
 }
 
-export function CodeEditor({ value, onChange, language = 'javascript', readOnly, height = 420, apis }: Props) {
+export function CodeEditor({ value, onChange, language = 'javascript', readOnly, height = 420, tools }: Props) {
   const { mode, systemMode } = useColorScheme();
   const dark = (mode === 'system' ? systemMode : mode) === 'dark';
 
   useEffect(() => {
-    if (!apis) return;
+    if (!tools) return;
     sandboxLib?.dispose();
-    sandboxLib = js.addExtraLib(sandboxDeclarations(apis), 'file:///prodaccess-sandbox.d.ts');
-  }, [apis]);
+    sandboxLib = js.addExtraLib(sandboxDeclarations(tools), 'file:///prodaccess-sandbox.d.ts');
+  }, [tools]);
 
   return (
     <Box sx={{ border: 1, borderColor: 'divider', borderRadius: 1, overflow: 'hidden' }}>

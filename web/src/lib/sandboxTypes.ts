@@ -1,15 +1,19 @@
-import type { ApiEntry } from '../api';
+import type { Tool } from '../api';
+import { TOOL_TYPE_LABEL } from '../components/StatusChip';
 
 /** Type declarations of the runner sandbox's globals (see runner prelude.js), for editor completion and checks. */
-export function sandboxDeclarations(apis: ApiEntry[]): string {
-  const services = new Map<string, ApiEntry[]>();
-  for (const a of apis) services.set(a.service, [...(services.get(a.service) ?? []), a]);
-  const api = [...services]
-    .map(([service, ops]) => {
-      const members = ops
-        .map((o) => `    /** ${o.method} ${o.pathTemplate} · ${o.access} */\n    ${o.operation}(args?: ApiArgs): any;`)
+export function sandboxDeclarations(tools: Tool[]): string {
+  const roles = new Map<string, Tool[]>();
+  for (const t of tools) roles.set(t.role, [...(roles.get(t.role) ?? []), t]);
+  const api = [...roles]
+    .map(([role, ts]) => {
+      const members = ts
+        .map((t) => {
+          const doc = [t.description, `${TOOL_TYPE_LABEL[t.type]} · ${t.method} ${t.baseUrl ?? ''}${t.pathTemplate}`].filter(Boolean).join(' — ');
+          return `    /** ${doc.replaceAll('*/', '* /')} */\n    ${t.name}(args?: ApiArgs): any;`;
+        })
         .join('\n');
-      return `  readonly ${service}: {\n${members}\n  };`;
+      return `  readonly ${role}: {\n${members}\n  };`;
     })
     .join('\n');
 
@@ -36,7 +40,7 @@ interface ApiArgs {
   body?: unknown;
 }
 declare class ApiError extends Error { readonly status?: number; readonly body?: unknown }
-/** The operations in the API list. Calls run as the task's Client and are audited. */
+/** The registered tools, by provider CMDB role. Every call is checked against the run's tool set and audited. */
 declare const api: {
 ${api}
 };

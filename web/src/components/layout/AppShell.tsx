@@ -13,7 +13,7 @@ export function AppShell() {
   const status = useResource('admin-status', api.adminStatus, 15000);
 
   return (
-    <CurrentUserContext value={me.data?.user ?? null}>
+    <CurrentUserContext value={me.data ?? null}>
       <Box sx={{ display: 'flex', minHeight: '100vh' }}>
         <AppBar position="fixed" elevation={0} color="default" sx={{ zIndex: (t) => t.zIndex.drawer + 1, borderBottom: 1, borderColor: 'divider' }}>
           <Toolbar variant="dense" sx={{ gap: 2 }}>

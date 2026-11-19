@@ -10,11 +10,14 @@ server.shutdown: graceful
 prodaccess:
   # Identity normally comes from the SSO proxy header (X-User). Empty = reject requests without it.
   dev-user: ""
-  gateway:
+  api-forge:
     base-url: http://localhost:9000
     token-url: http://localhost:9000/oauth/token
+    # client-id / client-secret: the prod-access identity; supply from Vault, never commit it.
   runner:
     jar: runner/build/libs/runner.jar
     max-concurrent: 4
-  # Replace with the Vault-backed CredentialProvider; ref names match clients.credential_ref.
-  credentials: {}
+  # Stand-in for CMDB: role -> owning teams, team -> members.
+  cmdb:
+    role-owners: {}
+    teams: {}

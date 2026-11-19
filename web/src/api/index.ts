@@ -1,29 +1,29 @@
 import { http, type Query } from './http';
-import type { ApiCallRecord, ApiEntry, Client, Run, RunLogEntry, Task, TaskVersion } from './types';
+import type { Me, Run, RunLogEntry, Task, TaskVersion, Tool, ToolCallRecord } from './types';
 
 export { ApiError } from './http';
 export * from './types';
 
-export type ClientInput = Pick<Client, 'name' | 'environment' | 'credentialRef' | 'description' | 'enabled'>;
-export type ApiInput = Pick<ApiEntry, 'service' | 'operation' | 'method' | 'pathTemplate'> & { access: string | null };
+export type ToolInput = Pick<Tool, 'role' | 'name' | 'type' | 'method' | 'pathTemplate' | 'baseUrl' | 'description'>;
 export type Params = Record<string, string>;
+/** What a script passes to a tool, and what a direct call sends. */
+export interface ToolRequest {
+  path?: Record<string, string>;
+  query?: Record<string, string>;
+  headers?: Record<string, string>;
+  body?: unknown;
+}
 
 export const api = {
-  me: () => http.get<{ user: string }>('/me'),
+  me: () => http.get<Me>('/me'),
   adminStatus: () => http.get<{ paused: boolean; activeRuns: number }>('/admin/status'),
 
-  clients: {
-    list: (q?: Query) => http.get<Client[]>('/clients', q),
-    get: (id: string) => http.get<Client>(`/clients/${id}`),
-    create: (in_: ClientInput) => http.post<Client>('/clients', in_),
-    update: (id: string, in_: Partial<ClientInput>) => http.put<Client>(`/clients/${id}`, in_),
-  },
-
-  apis: {
-    list: (q?: Query) => http.get<ApiEntry[]>('/apis', q),
-    get: (id: string) => http.get<ApiEntry>(`/apis/${id}`),
-    save: (in_: ApiInput) => http.post<ApiEntry>('/apis', in_),
-    delete: (id: string) => http.delete(`/apis/${id}`),
+  tools: {
+    list: (q?: Query) => http.get<Tool[]>('/tools', q),
+    get: (id: string) => http.get<Tool>(`/tools/${id}`),
+    create: (in_: ToolInput) => http.post<Tool>('/tools', in_),
+    update: (id: string, in_: ToolInput) => http.put<Tool>(`/tools/${id}`, in_),
+    delete: (id: string) => http.delete(`/tools/${id}`),
   },
 
   tasks: {
@@ -31,20 +31,18 @@ export const api = {
     get: (id: string) => http.get<Task>(`/tasks/${id}`),
     versions: (id: string) => http.get<TaskVersion[]>(`/tasks/${id}/versions`),
     version: (id: string, ver: number) => http.get<TaskVersion>(`/tasks/${id}/versions/${ver}`),
-    create: (name: string, clientId: string, script: string) => http.post<TaskVersion>('/tasks', { name, clientId, script }),
-    saveVersion: (id: string, clientId: string, script: string) => http.post<TaskVersion>(`/tasks/${id}/versions`, { clientId, script }),
+    create: (name: string, script: string) => http.post<TaskVersion>('/tasks', { name, script }),
+    saveVersion: (id: string, script: string) => http.post<TaskVersion>(`/tasks/${id}/versions`, { script }),
   },
 
   runs: {
     list: (q?: Query) => http.get<Run[]>('/runs', q),
     get: (id: string) => http.get<Run>(`/runs/${id}`),
     events: (id: string, after: number) => http.get<RunLogEntry[]>(`/runs/${id}/events`, { after }),
-    apiCalls: (id: string) => http.get<ApiCallRecord[]>(`/runs/${id}/api-calls`),
-    submit: (taskId: string, params: Params, confirmClient: string) => http.post<Run>('/runs', { taskId, params, confirmClient }),
-    adhoc: (clientId: string, script: string, params: unknown, confirmClient: string) =>
-      http.post<Run>('/runs/adhoc', { clientId, script, params, confirmClient }),
-    approve: (id: string) => http.post<Run>(`/runs/${id}/approve`),
-    reject: (id: string, reason: string) => http.post<Run>(`/runs/${id}/reject`, { reason }),
+    toolCalls: (id: string) => http.get<ToolCallRecord[]>(`/runs/${id}/tool-calls`),
+    submit: (taskId: string, params: Params) => http.post<Run>('/runs', { taskId, params }),
+    adhoc: (script: string, params: unknown) => http.post<Run>('/runs/adhoc', { script, params }),
+    call: (toolId: string, request: ToolRequest) => http.post<Run>('/runs/call', { toolId, request }),
     cancel: (id: string) => http.post<Run>(`/runs/${id}/cancel`),
   },
 };

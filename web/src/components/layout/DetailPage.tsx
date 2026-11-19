@@ -8,7 +8,7 @@ interface Props {
   title: ReactNode;
   subtitle?: ReactNode;
   status?: ReactNode;
-  /** Actions on the shown entity (approve, edit, run ...), top right. */
+  /** Actions on the shown entity (edit, run, cancel ...), top right. */
   actions?: ReactNode;
   /** The entity has not loaded yet: show a spinner instead of the sections. */
   loading?: boolean;
