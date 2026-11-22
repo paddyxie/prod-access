@@ -1,5 +1,5 @@
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
-import { Link } from '@mui/material';
+import { IconButton, Tooltip } from '@mui/material';
 import { Link as RouterLink } from 'react-router';
 
 export interface Back {
@@ -8,9 +8,12 @@ export interface Back {
 }
 
 export function BackLink({ to, label }: Back) {
+  const title = `Back to ${label}`;
   return (
-    <Link component={RouterLink} to={to} underline="hover" variant="body2" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
-      <ArrowBackIcon fontSize="inherit" /> {label}
-    </Link>
+    <Tooltip title={title}>
+      <IconButton component={RouterLink} to={to} aria-label={title} size="small" sx={{ color: 'text.secondary' }}>
+        <ArrowBackIcon fontSize="small" />
+      </IconButton>
+    </Tooltip>
   );
 }

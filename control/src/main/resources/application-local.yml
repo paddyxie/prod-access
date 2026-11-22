@@ -1,0 +1,10 @@
+server:
+  address: 127.0.0.1
+
+prodaccess:
+  dev-user: local-dev
+  cmdb:
+    role-owners:
+      orders: [local-orders-team]
+    teams:
+      local-orders-team: [local-dev]

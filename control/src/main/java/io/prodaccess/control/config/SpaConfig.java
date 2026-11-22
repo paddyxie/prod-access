@@ -10,7 +10,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 import org.springframework.web.servlet.resource.PathResourceResolver;
 
 /**
- * Serves the single-page UI. Client-side routes (/runs/123, /tasks/new, ...) have no file behind them, so any
+ * Serves the single-page UI. Client-side routes (/runs/123, /workflows/new, ...) have no file behind them, so any
  * extension-less path outside /api falls back to index.html and the browser router takes it from there.
  * Bundled assets have content hashes in their names and are cached for good; index.html is always revalidated,
  * so a deployment takes effect on the next page load.

@@ -12,7 +12,7 @@ export function ToolListPage() {
   return (
     <ListPage
       title="Tools"
-      subtitle="The APIs scripts may call as api.<role>.<tool>(), registered per provider CMDB role. Only teams that own a role may call or edit its tools. Open a tool to call it once."
+      subtitle="API contracts registered under each system."
       actions={
         <Button variant="contained" startIcon={<AddIcon />} component={RouterLink} to="/tools/new">
           New tool
@@ -26,13 +26,15 @@ export function ToolListPage() {
       load={(f) => api.tools.list(f)}
       columns={[
         { header: 'Tool', render: (t) => `${t.role}.${t.name}`, mono: true },
+        { header: 'Version', render: (t) => `v${t.ver}` },
+        { header: 'Service', render: (t) => t.service },
         { header: 'Type', render: (t) => <ToolTypeChip type={t.type} />, width: 130 },
         { header: 'Request', render: (t) => `${t.method} ${t.baseUrl ?? ''}${t.pathTemplate}`, mono: true },
         { header: 'Description', render: (t) => t.description },
         { header: 'Role', render: (t) => <RoleChip role={t.role} owned={!!me?.ownedRoles.includes(t.role)} /> },
       ]}
       rowKey={(t) => t.id}
-      rowLink={(t) => `/tools/${t.id}/call`}
+      rowLink={(t) => `/tools/${t.id}`}
       emptyText="No tools match."
     />
   );

@@ -37,6 +37,7 @@ val runnerJarArg = CommandLineArgumentProvider { listOf("-Dprodaccess.runner.jar
 
 tasks.bootRun {
     workingDir = rootDir
+    environment("SPRING_PROFILES_DEFAULT", providers.environmentVariable("SPRING_PROFILES_DEFAULT").orElse("local").get())
     inputs.files(runnerJarFiles)
     jvmArgumentProviders.add(runnerJarArg)
 }

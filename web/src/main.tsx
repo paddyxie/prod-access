@@ -1,19 +1,15 @@
 import { CssBaseline } from '@mui/material';
-import { createTheme, ThemeProvider } from '@mui/material/styles';
+import { ThemeProvider } from '@mui/material/styles';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { RouterProvider } from 'react-router';
 import { router } from './routes';
 
-const theme = createTheme({
-  colorSchemes: { light: true, dark: true }, // follows the OS setting
-  shape: { borderRadius: 6 },
-  typography: { fontSize: 13 },
-});
+import { consoleTheme } from './theme';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <ThemeProvider theme={theme}>
+    <ThemeProvider theme={consoleTheme} defaultMode="system" modeStorageKey="prod-access-color-scheme">
       <CssBaseline />
       <RouterProvider router={router} />
     </ThemeProvider>

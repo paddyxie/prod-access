@@ -19,6 +19,11 @@ export interface Me {
 
 export interface Tool {
   id: string;
+  cmdbRoleId: string;
+  service: string;
+  versionId: string;
+  ver: number;
+  retired: boolean;
   role: string;
   name: string;
   type: ToolType;
@@ -27,11 +32,14 @@ export interface Tool {
   /** HTTP Client tools only. */
   baseUrl: string | null;
   description: string | null;
+  gatewayApiId: string | null;
+  inputSchemaJson: string;
+  outputSchemaJson: string;
   updatedBy: string;
   updatedAt: number;
 }
 
-export interface Task {
+export interface Workflow {
   id: string;
   name: string | null;
   createdBy: string;
@@ -43,15 +51,25 @@ export interface Task {
   updatedAt: number;
 }
 
-export interface TaskVersion {
+export interface ToolBinding {
+  toolId: string;
+  versionId: string;
+  key: string;
+  ver: number;
+  retired: boolean;
+}
+
+export interface WorkflowVersion {
   id: string;
-  taskId: string;
+  workflowId: string;
   ver: number;
   script: string;
   scriptHash: string;
   metaJson: string;
   paramsJson: string;
+  outputSchemaJson: string;
   toolsJson: string;
+  toolBindings: ToolBinding[];
   createdBy: string;
   createdAt: number;
 }
@@ -59,13 +77,15 @@ export interface TaskVersion {
 export interface Run {
   id: string;
   kind: RunKind;
-  taskId: string | null;
-  taskName: string | null;
+  workflowVersionId: string | null;
+  toolVersionId: string | null;
+  workflowId: string | null;
+  workflowName: string | null;
   ver: number | null;
   /** `role.name` of the tool, for a direct call. */
   toolKey: string | null;
   rolesJson: string;
-  /** Task parameters, or the request of a direct call. */
+  /** Workflow parameters, or the request of a direct call. */
   paramsJson: string;
   submittedBy: string;
   status: RunStatus;
@@ -86,19 +106,73 @@ export interface RunLogEntry {
 }
 
 export interface ToolCallRecord {
-  id: number;
-  ts: number;
+  id: string;
+  executionId: string;
+  actionId: string | null;
+  toolVersionId: string;
+  service: string;
   role: string;
   tool: string;
+  ver: number;
   type: ToolType;
-  method: string;
-  path: string;
-  status: number | null;
-  durationMs: number | null;
+  actor: string;
+  startedAt: number;
+  finishedAt: number | null;
+  status: string;
+  inputJson: string;
+  inputTruncated: boolean;
+  outputJson: string | null;
+  outputTruncated: boolean;
   error: string | null;
 }
+export interface ApiCallRecord {
+  id: string;
+  invocationId: string;
+  attempt: number;
+  startedAt: number;
+  finishedAt: number | null;
+  method: string;
+  url: string;
+  requestHeadersJson: string;
+  requestBody: string | null;
+  requestTruncated: boolean;
+  responseStatus: number | null;
+  responseHeadersJson: string | null;
+  responseBody: string | null;
+  responseTruncated: boolean;
+  status: string;
+  error: string | null;
+}
+export interface ExecutionAction {
+  id: string;
+  executionId: string;
+  parentActionId: string | null;
+  name: string;
+  status: string;
+  startedAt: number;
+  finishedAt: number | null;
+  inputJson: string | null;
+  resultJson: string | null;
+  error: string | null;
+}
+export interface ServiceDefinition {
+  id: string;
+  code: string;
+  name: string;
+  description: string | null;
+}
+export const SYSTEM_TYPES = ['WEB', 'KAFKA', 'BATCH', 'WORKER', 'OTHER'] as const;
+export interface CmdbRole {
+  id: string;
+  serviceId: string;
+  serviceCode: string;
+  code: string;
+  name: string;
+  systemType: (typeof SYSTEM_TYPES)[number];
+  description: string | null;
+}
 
-/** A param descriptor as declared by a task script (`param.string({...})` etc.). */
+/** A param descriptor as declared by a workflow script (`param.string({...})` etc.). */
 export interface ParamDef {
   type: 'string' | 'text' | 'number' | 'boolean' | 'date' | 'datetime' | 'enum' | 'json' | 'list' | 'csv';
   label?: string;
@@ -109,3 +183,7 @@ export interface ParamDef {
   item?: ParamDef;
   columns?: string[];
 }
+
+export interface LegacyRecord { sourceTable: string; sourceId: string; executionId: string | null; sourceJson: string; archivedAt: number }
+
+export interface ExecutionInput { executionId: string; submittedJson: string; resolvedJson: string }

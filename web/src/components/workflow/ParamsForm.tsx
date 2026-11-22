@@ -9,10 +9,10 @@ interface Props {
   errors?: Record<string, string>;
 }
 
-/** Inputs generated from the params a task script declares. Values are sent as text; the server coerces them. */
+/** Inputs generated from the params a workflow script declares. Values are sent as text; the server coerces them. */
 export function ParamsForm({ defs, values, onChange, errors = {} }: Props) {
   const names = Object.keys(defs);
-  if (names.length === 0) return <Typography color="text.secondary">This task takes no parameters.</Typography>;
+  if (names.length === 0) return <Typography color="text.secondary">This workflow takes no parameters.</Typography>;
   return names.map((name) => {
     const d = defs[name];
     const value = values[name] ?? '';

@@ -1,3 +1,4 @@
+import { schemaType, type JsonSchema } from './jsonSchema';
 import type { Tool } from '../api';
 import { TOOL_TYPE_LABEL } from '../components/StatusChip';
 
@@ -10,7 +11,7 @@ export function sandboxDeclarations(tools: Tool[]): string {
       const members = ts
         .map((t) => {
           const doc = [t.description, `${TOOL_TYPE_LABEL[t.type]} · ${t.method} ${t.baseUrl ?? ''}${t.pathTemplate}`].filter(Boolean).join(' — ');
-          return `    /** ${doc.replaceAll('*/', '* /')} */\n    ${t.name}(args?: ApiArgs): any;`;
+          return `    /** ${doc.replaceAll('*/', '* /')} */\n    ${t.name}(args: ${schemaType(JSON.parse(t.inputSchemaJson) as JsonSchema)}): ${schemaType(JSON.parse(t.outputSchemaJson) as JsonSchema)};`;
         })
         .join('\n');
       return `  readonly ${role}: {\n${members}\n  };`;
@@ -33,12 +34,6 @@ declare const param: {
   list(item: ParamDef, o?: ParamOptions<string> & { max?: number }): ParamDef;
 };
 
-interface ApiArgs {
-  path?: Record<string, string | number>;
-  query?: Record<string, string | number | boolean>;
-  headers?: Record<string, string>;
-  body?: unknown;
-}
 declare class ApiError extends Error { readonly status?: number; readonly body?: unknown }
 /** The registered tools, by provider CMDB role. Every call is checked against the run's tool set and audited. */
 declare const api: {
@@ -55,12 +50,14 @@ declare const batch: {
              opts?: { continueOnError?: boolean; maxFailures?: number }): Promise<Array<{ item: T; ok: boolean; value?: R; error?: string }>>;
 };
 
-interface TaskContext {
+interface WorkflowContext {
   readonly runId: string;
   readonly params: Record<string, any>;
   readonly log: Logger;
-  /** A named step: its start and end are recorded in the run log. */
-  step<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  /** Calls on the step callback's context are attributed to that step, including after await. */
+  readonly api: typeof api;
+  /** Records a named action. Use the callback context for nested steps and overlapping tool calls. */
+  step<T>(name: string, fn: (action: WorkflowContext) => T | Promise<T>, input?: unknown): Promise<T>;
 }
 `;
 }

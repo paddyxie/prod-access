@@ -1,37 +1,35 @@
-import { Alert, Box, Button, Link, Typography } from '@mui/material';
+import { ExecutionTrace } from '../../components/run/ExecutionTrace';
+import { Alert, Button, Link } from '@mui/material';
 import { useState } from 'react';
-import { Link as RouterLink, useParams } from 'react-router';
-import { ACTIVE_STATUSES, api, type Run, type ToolCallRecord } from '../../api';
+import { Link as RouterLink, useParams, useSearchParams } from 'react-router';
+import { ACTIVE_STATUSES, api, type Run } from '../../api';
 import { CodeEditor } from '../../components/CodeEditor';
-import { DataTable, DetailPage, Fields, Section, type Column } from '../../components/layout';
+import { DetailPage, Fields, Section } from '../../components/layout';
 import { PromptDialog } from '../../components/PromptDialog';
 import { RunLog } from '../../components/run/RunLog';
 import { runSubject } from '../../components/run/runColumns';
-import { StatusChip, ToolTypeChip } from '../../components/StatusChip';
+import { StatusChip } from '../../components/StatusChip';
 import { useResource } from '../../hooks/useResource';
+import { CodeBlock } from '../../components/layout/CodeBlock';
 import { formatDuration, formatTime, prettyJson, shortId } from '../../lib/format';
-
-const callColumns: Column<ToolCallRecord>[] = [
-  { header: 'Time', render: (c) => new Date(c.ts).toLocaleTimeString(), width: 110 },
-  { header: 'Tool', render: (c) => `${c.role}.${c.tool}`, mono: true },
-  { header: 'Type', render: (c) => <ToolTypeChip type={c.type} />, width: 130 },
-  { header: 'Request', render: (c) => `${c.method} ${c.path}`, mono: true },
-  { header: 'Status', render: (c) => c.status ?? '—', width: 80 },
-  { header: 'Duration', render: (c) => (c.durationMs == null ? '—' : `${c.durationMs} ms`), width: 100 },
-  { header: 'Error', render: (c) => c.error },
-];
 
 export function RunDetailPage() {
   const { id = '' } = useParams();
+  const [query] = useSearchParams();
+  const invocationId = query.get('invocation');
   const [live, setLive] = useState(true);
   const run = useResource(`run:${id}`, () => api.runs.get(id), live ? 2000 : undefined);
   const r = run.data;
   if (r && live !== ACTIVE_STATUSES.includes(r.status)) setLive(!live);
   const script = r?.kind === 'SCRIPT';
-  const version = useResource(`run-version:${r?.taskId}:${r?.ver}`, () =>
-    r?.taskId && r.ver != null ? api.tasks.version(r.taskId, r.ver) : Promise.resolve(null),
+  const version = useResource(`run-version:${r?.workflowId}:${r?.ver}`, () =>
+    r?.workflowId && r.ver != null ? api.workflows.version(r.workflowId, r.ver) : Promise.resolve(null),
   );
   const calls = useResource(`run-calls:${id}:${r?.status}`, () => api.runs.toolCalls(id), live ? 3000 : undefined);
+
+  const inputs = useResource(`run-inputs:${id}`, () => api.runs.inputs(id));
+  const requests = useResource(`run-http:${id}:${r?.status}`, () => api.runs.apiCalls(id), live ? 3000 : undefined);
+  const actions = useResource(`run-actions:${id}:${r?.status}`, () => api.runs.actions(id), live ? 3000 : undefined);
 
   const [actionError, setActionError] = useState<Error | null>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -48,12 +46,12 @@ export function RunDetailPage() {
 
   return (
     <DetailPage
-      back={{ to: '/runs', label: 'Runs' }}
-      title={`Run ${shortId(id)}`}
+      back={{ to: '/runs', label: 'Executions' }}
+      title={`Execution ${shortId(id)}`}
       subtitle={
         r && (
           <>
-            {r.taskId && r.taskName ? <Link component={RouterLink} to={`/tasks/${r.taskId}`}>{r.taskName}</Link> : runSubject(r)}
+            {r.workflowId && r.workflowName ? <Link component={RouterLink} to={`/workflows/${r.workflowId}?version=${r.ver}`}>{r.workflowName}</Link> : runSubject(r)}
             {script && ` · v${r.ver}`} · {script ? 'script' : 'single call'}
           </>
         )
@@ -76,7 +74,7 @@ export function RunDetailPage() {
               items={[
                 ['Submitted by', r.submittedBy],
                 ['Roles checked', (JSON.parse(r.rolesJson) as string[]).join(', ')],
-                ['Tools', script ? version.data && (JSON.parse(version.data.toolsJson) as string[]).join(', ') : r.toolKey],
+                ['Tools', script ? version.data?.toolBindings.map((tool) => `${tool.key} v${tool.ver}`).join(', ') : r.toolKey],
                 ['Created', formatTime(r.createdAt)],
                 ['Started', formatTime(r.startedAt)],
                 ['Finished', formatTime(r.finishedAt)],
@@ -84,8 +82,13 @@ export function RunDetailPage() {
               ]}
             />
           </Section>
-          <Section title={script ? 'Parameters' : 'Request'}>
-            <Mono text={prettyJson(r.paramsJson)} />
+          <Section title="Execution audit">
+            {(calls.error || requests.error || actions.error) && <Alert severity="error">{(calls.error ?? requests.error ?? actions.error)?.message}</Alert>}
+            <ExecutionTrace calls={calls.data ?? []} requests={requests.data ?? []} actions={actions.data ?? []} selectedInvocation={invocationId} />
+          </Section>
+          {script && inputs.data && <Section title="Submitted input"><CodeBlock text={prettyJson(inputs.data.submittedJson)} /></Section>}
+          <Section title={script ? 'Validated input' : 'Request'}>
+            <CodeBlock text={prettyJson(r.paramsJson)} />
           </Section>
           {r.error && (
             <Section title="Error">
@@ -94,7 +97,7 @@ export function RunDetailPage() {
           )}
           {r.resultJson && (
             <Section title={script ? 'Result' : 'Response'}>
-              <Mono text={prettyJson(r.resultJson)} />
+              <CodeBlock text={prettyJson(r.resultJson)} />
             </Section>
           )}
           {script && (
@@ -102,9 +105,6 @@ export function RunDetailPage() {
               <RunLog key={id} runId={id} live={live} />
             </Section>
           )}
-          <Section title={`Tool calls (${calls.data?.length ?? 0})`}>
-            <DataTable columns={callColumns} rows={calls.data} rowKey={(c) => c.id} emptyText="No tool calls." />
-          </Section>
           {script && <Section title="Script">{version.data && <CodeEditor value={version.data.script} readOnly height={360} />}</Section>}
         </>
       )}
@@ -118,14 +118,5 @@ export function RunDetailPage() {
         onConfirm={() => act(() => api.runs.cancel(id))}
       />
     </DetailPage>
-  );
-}
-
-function Mono({ text }: { text: string }) {
-  if (!text) return <Typography color="text.secondary">—</Typography>;
-  return (
-    <Box component="pre" sx={{ m: 0, p: 1.5, bgcolor: 'action.hover', borderRadius: 1, fontSize: 12.5, overflow: 'auto', maxHeight: 360 }}>
-      {text}
-    </Box>
   );
 }

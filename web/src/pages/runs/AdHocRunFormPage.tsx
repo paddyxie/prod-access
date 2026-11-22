@@ -6,7 +6,7 @@ import { CodeEditor } from '../../components/CodeEditor';
 import { FormPage } from '../../components/layout';
 import { useResource } from '../../hooks/useResource';
 
-const TEMPLATE = `/** @param {TaskContext} ctx */
+const TEMPLATE = `/** @param {WorkflowContext} ctx */
 export default async function main(ctx) {
   return 'hello';
 }
@@ -31,7 +31,7 @@ export function AdHocRunFormPage() {
 
   return (
     <FormPage
-      back={{ to: '/runs', label: 'Runs' }}
+      back={{ to: '/runs', label: 'Executions' }}
       title="Run an ad-hoc script"
       subtitle="Runs once in the sandbox. Your teams must own every role whose tools the script calls."
       submitLabel="Run"

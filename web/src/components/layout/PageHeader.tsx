@@ -1,31 +1,32 @@
 import { Box, Stack, Typography } from '@mui/material';
 import type { ReactNode } from 'react';
+import { consoleHeaderHeight } from '../../theme';
+import { BackLink, type Back } from './BackLink';
 
 interface Props {
   title: ReactNode;
   subtitle?: ReactNode;
   status?: ReactNode;
-  /** Page-level buttons, always top right. */
   actions?: ReactNode;
+  back?: Back;
 }
 
-export function PageHeader({ title, subtitle, status, actions }: Props) {
+export function PageHeader({ title, subtitle, status, actions, back }: Props) {
   return (
-    <Stack direction="row" spacing={2} sx={{ alignItems: 'flex-start', flexWrap: 'wrap', rowGap: 1 }}>
-      <Box sx={{ flex: 1, minWidth: 240 }}>
-        <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center' }}>
-          <Typography variant="h5" component="h1" sx={{ fontWeight: 600 }}>
-            {title}
-          </Typography>
+    <Box component="header" sx={{ position: 'sticky', top: 0, zIndex: 2, bgcolor: 'background.paper', borderBottom: 1, borderColor: 'divider' }}>
+      <Stack direction="row" sx={{ minHeight: consoleHeaderHeight - 1, px: { xs: 1.5, sm: 2.5 }, py: 0.75, gap: 1.25, flexWrap: 'wrap', alignItems: 'center' }}>
+        {back && <BackLink {...back} />}
+        <Stack direction="row" sx={{ minWidth: 0, flex: '1 1 180px', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
+          <Typography variant="h5" component="h1" sx={{ overflowWrap: 'anywhere' }}>{title}</Typography>
           {status}
         </Stack>
-        {subtitle && (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            {subtitle}
-          </Typography>
-        )}
-      </Box>
-      {actions && <Stack direction="row" spacing={1}>{actions}</Stack>}
-    </Stack>
+        {actions && <Stack direction="row" sx={{ ml: 'auto', flexWrap: 'wrap', gap: 0.75 }}>{actions}</Stack>}
+      </Stack>
+      {subtitle && (
+        <Typography component="div" variant="body2" color="text.secondary" sx={{ px: { xs: 1.5, sm: 2.5 }, mt: -0.25, pb: 1, overflowWrap: 'anywhere' }}>
+          {subtitle}
+        </Typography>
+      )}
+    </Box>
   );
 }

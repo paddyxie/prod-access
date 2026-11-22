@@ -11,6 +11,7 @@ export interface FilterDef {
   name: string;
   label: string;
   /** A free-text box (default) or a dropdown. */
+  type?: 'datetime-local';
   options?: Option[] | (() => Promise<Option[]>);
 }
 
@@ -48,7 +49,7 @@ function SelectFilter({ def, value, onChange }: { def: FilterDef; value: string;
   const source = def.options!;
   const loaded = useResource(`filter-options:${def.name}`, () => (typeof source === 'function' ? source() : Promise.resolve(source)));
   return (
-    <TextField select size="small" label={def.label} value={loaded.data ? value : ''} onChange={(e) => onChange(e.target.value)} sx={{ width: FIELD_WIDTH }}>
+    <TextField select size="small" label={def.label} value={loaded.data?.some((option) => option.value === value) ? value : ''} onChange={(e) => onChange(e.target.value)} sx={{ width: { xs: '100%', sm: FIELD_WIDTH } }}>
       <MenuItem value="">
         <em>Any</em>
       </MenuItem>
@@ -76,5 +77,5 @@ function TextFilter({ def, value, onCommit }: { def: FilterDef; value: string; o
     const t = setTimeout(() => commit(text.trim()), 300);
     return () => clearTimeout(t);
   }, [text, value]);
-  return <TextField size="small" label={def.label} value={text} onChange={(e) => setText(e.target.value)} sx={{ width: FIELD_WIDTH }} />;
+  return <TextField size="small" type={def.type} slotProps={def.type ? { inputLabel: { shrink: true } } : undefined} label={def.label} value={text} onChange={(e) => setText(e.target.value)} sx={{ width: { xs: '100%', sm: FIELD_WIDTH } }} />;
 }

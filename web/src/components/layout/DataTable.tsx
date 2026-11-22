@@ -1,6 +1,8 @@
-import { LinearProgress, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Typography } from '@mui/material';
+import { LinearProgress, Link, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Typography } from '@mui/material';
 import type { ReactNode } from 'react';
-import { useNavigate } from 'react-router';
+import { Link as RouterLink, useNavigate } from 'react-router';
+
+import { monoFont } from '../../theme';
 
 export interface Column<T> {
   header: string;
@@ -24,11 +26,11 @@ export function DataTable<T>({ columns, rows, rowKey, rowLink, loading, emptyTex
   return (
     <TableContainer component={Paper} variant="outlined">
       {loading && <LinearProgress />}
-      <Table size="small">
+      <Table size="small" sx={{ minWidth: rowLink ? 480 : undefined }}>
         <TableHead>
           <TableRow>
             {columns.map((c) => (
-              <TableCell key={c.header} sx={{ width: c.width, fontWeight: 600, color: 'text.secondary' }}>
+              <TableCell key={c.header} sx={{ width: c.width, color: 'text.secondary', bgcolor: 'action.hover', whiteSpace: 'nowrap' }}>
                 {c.header}
               </TableCell>
             ))}
@@ -39,12 +41,14 @@ export function DataTable<T>({ columns, rows, rowKey, rowLink, loading, emptyTex
             <TableRow
               key={rowKey(row)}
               hover={!!rowLink}
-              onClick={rowLink ? () => navigate(rowLink(row)) : undefined}
+              onClick={rowLink ? (event) => {
+                if (!(event.target instanceof Element) || !event.target.closest('a, button')) navigate(rowLink(row));
+              } : undefined}
               sx={rowLink ? { cursor: 'pointer' } : undefined}
             >
-              {columns.map((c) => (
-                <TableCell key={c.header} sx={c.mono ? { fontFamily: 'monospace' } : undefined}>
-                  {c.render(row)}
+              {columns.map((c, index) => (
+                <TableCell key={c.header} sx={c.mono ? { fontFamily: monoFont } : undefined}>
+                  {index === 0 && rowLink ? <Link component={RouterLink} to={rowLink(row)} underline="hover" sx={{ fontWeight: 650 }}>{c.render(row)}</Link> : c.render(row)}
                 </TableCell>
               ))}
             </TableRow>

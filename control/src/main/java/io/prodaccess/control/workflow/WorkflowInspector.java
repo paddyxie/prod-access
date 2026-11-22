@@ -1,4 +1,4 @@
-package io.prodaccess.control.task;
+package io.prodaccess.control.workflow;
 
 import io.prodaccess.common.protocol.RunSpec;
 import io.prodaccess.control.process.ChildProcessRunner;
@@ -14,12 +14,12 @@ import org.springframework.stereotype.Component;
  * capabilities (supervised exactly like a real run), so user code never executes inside this JVM.
  */
 @Component
-public class TaskInspector {
-    public record Inspection(Map<String, Object> meta, Map<String, Object> params) {}
+public class WorkflowInspector {
+    public record Inspection(Map<String, Object> meta, Map<String, Object> params, Object output) {}
 
     private final ChildProcessRunner runner;
 
-    TaskInspector(ChildProcessRunner runner) {
+    WorkflowInspector(ChildProcessRunner runner) {
         this.runner = runner;
     }
 
@@ -36,6 +36,6 @@ public class TaskInspector {
         }
         Map<String, Object> meta = found.get().get("meta") instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
         Map<String, Object> params = found.get().get("params") instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
-        return new Inspection(meta, params);
+        return new Inspection(meta, params, found.get().getOrDefault("output", Map.of()));
     }
 }

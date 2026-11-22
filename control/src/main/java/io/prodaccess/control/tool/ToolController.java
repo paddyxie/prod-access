@@ -34,6 +34,9 @@ class ToolController {
         return tools.get(id);
     }
 
+    @GetMapping("/{id}/versions")
+    List<Tool> versions(@PathVariable String id) { return tools.versions(id); }
+
     @PostMapping
     Tool create(@RequestBody ToolInput in) {
         return tools.create(in, CurrentUser.get());

@@ -104,9 +104,18 @@ public class ChildProcessRunner {
                         default -> { }
                     }
                     sink.accept(ev);
+                    if (ev.t().endsWith("_start") && ev.value() instanceof java.util.Map<?,?> data) {
+                        synchronized (process.getOutputStream()) {
+                            process.getOutputStream().write(("audit-ack:" + data.get("id") + "\n").getBytes(StandardCharsets.UTF_8));
+                            process.getOutputStream().flush();
+                        }
+                    }
                 }
             } catch (OversizedLine e) {
                 state.oversized = true;
+            } catch (RuntimeException failure) {
+                state.lastError = "audit recording failed: " + failure.getMessage();
+                process.destroyForcibly();
             } catch (IOException ignored) {
                 // process gone
             }
@@ -166,8 +175,10 @@ public class ChildProcessRunner {
                     cancelSent = true;
                     cancelAt = now;
                     try {
-                        stdin.write("cancel\n".getBytes(StandardCharsets.UTF_8));
-                        stdin.flush();
+                        synchronized (stdin) {
+                            stdin.write("cancel\n".getBytes(StandardCharsets.UTF_8));
+                            stdin.flush();
+                        }
                     } catch (IOException ignored) {
                         forced = Status.CANCELLED;
                         forcedReason = "cancelled";

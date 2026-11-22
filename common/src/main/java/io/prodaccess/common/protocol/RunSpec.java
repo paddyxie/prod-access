@@ -19,7 +19,7 @@ public record RunSpec(
         Limits limits,
         ApiForge apiForge) {
 
-    public static final int CURRENT_VERSION = 2;
+    public static final int CURRENT_VERSION = 3;
 
     public enum Mode { RUN, INSPECT }
 

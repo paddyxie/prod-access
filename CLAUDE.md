@@ -15,9 +15,9 @@ Build is Gradle (`./gradlew build`); versions only in `gradle/libs.versions.toml
 ## Backend: package by feature
 
 `control` is split by feature, not by layer. A feature package holds its records, service, controller and anything
-only it uses: `tool` (the registry), `task`, `run`, `admin`. Cross-cutting pieces have their own package:
+only it uses: `catalog` (Services and CMDB systems), `tool` (identities and immutable API contracts), `workflow`, `run` (executions and evidence), `admin`. Cross-cutting pieces have their own package:
 `ownership` (CMDB roles and teams), `process` (child process supervision), `security`, `audit`, `config`,
-`web` (errors), `jdbc`.
+`web` (errors), `jdbc`, `migration` (non-destructive legacy evidence archive).
 
 - Controllers are package-private and thin; the actor always comes from `CurrentUser`, never from the request body.
 - Records mirror table rows (snake_case columns map to camelCase components); list queries take optional

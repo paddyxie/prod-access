@@ -9,7 +9,7 @@ import { runColumns } from '../../components/run/runColumns';
 export function RunListPage() {
   return (
     <ListPage
-      title="Runs"
+      title="Executions"
       actions={
         <Button variant="contained" startIcon={<AddIcon />} component={RouterLink} to="/runs/new">
           Ad-hoc script
@@ -17,7 +17,7 @@ export function RunListPage() {
       }
       filters={[
         { name: 'status', label: 'Status', options: statusOptions },
-        { name: 'taskId', label: 'Task', options: taskOptions },
+        { name: 'workflowId', label: 'Workflow', options: taskOptions },
         { name: 'kind', label: 'Kind', options: kindOptions },
         { name: 'submittedBy', label: 'Submitted by' },
       ]}

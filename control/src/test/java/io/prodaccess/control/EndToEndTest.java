@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.sun.net.httpserver.HttpServer;
 import io.prodaccess.control.process.ChildProcessRunner;
@@ -39,6 +40,9 @@ class EndToEndTest {
     static final JsonMapper JSON = JsonMapper.builder().build();
     static final HttpClient HTTP = HttpClient.newHttpClient();
     static HttpServer target;
+    static final java.util.concurrent.ConcurrentHashMap<String,java.util.concurrent.atomic.AtomicInteger> retryCounts = new java.util.concurrent.ConcurrentHashMap<>();
+    static volatile org.springframework.jdbc.core.simple.JdbcClient auditDb;
+    static volatile boolean sawPersistedStart;
     /** "METHOD path | Authorization | X-Prod-Access-Actor" for every tool call the mock target received. */
     static final List<String> received = new CopyOnWriteArrayList<>();
 
@@ -56,6 +60,11 @@ class EndToEndTest {
         for (String prefix : List.of("/orders", "/direct")) {
             target.createContext(prefix, ex -> {
                 ex.getRequestBody().readAllBytes();
+                if (ex.getRequestURI().getPath().contains("/audit-start/")) {
+                    String executionId = ex.getRequestHeaders().getFirst("X-Prod-Access-Run");
+                    sawPersistedStart = auditDb.sql("SELECT COUNT(*) FROM api_calls a JOIN tool_invocations i ON i.id=a.invocation_id WHERE i.execution_id=? AND a.status='RUNNING'")
+                            .param(executionId).query(Integer.class).single() > 0;
+                }
                 received.add(ex.getRequestMethod() + " " + ex.getRequestURI().getPath() + " | "
                         + ex.getRequestHeaders().getFirst("Authorization") + " | " + ex.getRequestHeaders().getFirst("X-Prod-Access-Actor"));
                 if (ex.getRequestURI().getPath().endsWith("/slow")) {
@@ -63,7 +72,9 @@ class EndToEndTest {
                 }
                 byte[] b = ("{\"id\":\"" + ex.getRequestURI().getPath().replaceAll(".*/orders/", "").split("/")[0] + "\",\"state\":\"FAILED\"}").getBytes();
                 ex.getResponseHeaders().add("Content-Type", "application/json");
-                ex.sendResponseHeaders(200, b.length);
+                boolean retry = ex.getRequestURI().getPath().contains("/retry/")
+                        && retryCounts.computeIfAbsent(ex.getRequestURI().getPath(), key -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet() == 1;
+                ex.sendResponseHeaders(retry ? 401 : 200, b.length);
                 ex.getResponseBody().write(b);
                 ex.close();
             });
@@ -94,10 +105,13 @@ class EndToEndTest {
 
     @LocalServerPort int port;
     @Autowired ChildProcessRunner runner;
+    @Autowired org.springframework.jdbc.core.simple.JdbcClient db;
+    @Autowired io.prodaccess.control.tool.ToolService toolService;
 
     // ---- helpers
 
     JsonNode call(String user, HttpMethod m, String path, Object body, int expectedStatus) {
+        auditDb = db;
         HttpRequest req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
                 .header("X-User", user)
                 .header("Content-Type", "application/json")
@@ -115,12 +129,27 @@ class EndToEndTest {
 
     /** Registers a tool once (as alice, an owner of the role) and returns its id. */
     String tool(String role, String name, String type, String method, String path, String baseUrl) {
+        ensureCatalog(role);
         for (JsonNode t : call("alice", HttpMethod.GET, "/api/tools?role=" + role, null, 200)) {
             if (t.get("name").asString().equals(name)) return t.get("id").asString();
         }
         Map<String, Object> in = new HashMap<>(Map.of("role", role, "name", name, "type", type, "method", method, "pathTemplate", path));
+        in.put("inputSchemaJson", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}}},\"query\":{\"type\":\"object\"},\"headers\":{\"type\":\"object\"},\"body\":{}},\"additionalProperties\":false}");
+        in.put("outputSchemaJson", "{\"type\":\"object\",\"required\":[\"id\",\"state\"],\"properties\":{\"id\":{\"type\":\"string\"},\"state\":{\"type\":\"string\"}}}");
         if (baseUrl != null) in.put("baseUrl", baseUrl);
         return call("alice", HttpMethod.POST, "/api/tools", in, 200).get("id").asString();
+    }
+
+    void ensureCatalog(String role) {
+        for (JsonNode r : call("alice", HttpMethod.GET, "/api/catalog/roles", null, 200)) {
+            if (r.get("code").asString().equals(role)) return;
+        }
+        String serviceId = null;
+        for (JsonNode service : call("alice", HttpMethod.GET, "/api/catalog/services", null, 200)) {
+            if (service.get("code").asString().equals("commerce")) serviceId = service.get("id").asString();
+        }
+        if (serviceId == null) serviceId = call("alice", HttpMethod.POST, "/api/catalog/services", Map.of("code", "commerce", "name", "Commerce"), 200).get("id").asString();
+        call("alice", HttpMethod.POST, "/api/catalog/roles", Map.of("serviceId", serviceId, "code", role, "name", role, "systemType", "WEB"), 200);
     }
 
     void seed() {
@@ -176,6 +205,10 @@ class EndToEndTest {
         JsonNode run = awaitRun(id, "SUCCEEDED", "FAILED");
         assertEquals("SUCCEEDED", run.get("status").asString(), run.toString());
         JsonNode result = JSON.readTree(run.get("resultJson").asString());
+        JsonNode input = call("alice", HttpMethod.GET, "/api/runs/"+id+"/inputs", null, 200);
+        assertEquals("o1,o2", JSON.readTree(input.get("submittedJson").asString()).get("ids").asString());
+        assertEquals(2, JSON.readTree(input.get("resolvedJson").asString()).get("ids").size());
+        assertEquals("x", JSON.readTree(input.get("resolvedJson").asString()).get("note").asString());
         assertEquals(2, result.get("count").asInt());
         assertEquals("o1", result.get("first").get("id").asString());
 
@@ -184,7 +217,20 @@ class EndToEndTest {
         assertEquals(2, calls.size());
         assertEquals("getOrder", calls.get(0).get("tool").asString());
         assertEquals("API_FORGE", calls.get(0).get("type").asString());
-        assertEquals(200, calls.get(0).get("status").asInt());
+        assertEquals("SUCCEEDED", calls.get(0).get("status").asString());
+        assertEquals("alice", calls.get(0).get("actor").asString());
+        assertEquals("commerce", calls.get(0).get("service").asString());
+        assertNotNull(calls.get(0).get("actionId"));
+        JsonNode httpCalls = call("alice", HttpMethod.GET, "/api/runs/" + id + "/api-calls", null, 200);
+        assertEquals(2, httpCalls.size());
+        assertEquals(200, httpCalls.get(0).get("responseStatus").asInt());
+        assertTrue(httpCalls.get(0).get("url").asString().contains("/orders/orders/o1"));
+        assertTrue(httpCalls.get(0).get("responseBody").asString().contains("o1"));
+        assertFalse(httpCalls.toString().contains("tok-1"));
+        JsonNode actions = call("alice", HttpMethod.GET, "/api/runs/" + id + "/actions", null, 200);
+        assertEquals(1, actions.size());
+        assertEquals("SUCCEEDED", actions.get(0).get("status").asString());
+        assertTrue(actions.get(0).get("resultJson").asString().contains("o1"));
         JsonNode events = call("alice", HttpMethod.GET, "/api/runs/" + id + "/events", null, 200);
         assertTrue(events.toString().contains("lookup start") && events.toString().contains("found 2"));
         awaitNoChildren();
@@ -207,7 +253,7 @@ class EndToEndTest {
         adhoc("carol", LOOKUP, Map.of("ids", "c1"), 403);
         assertEquals(before, received.size(), "a refused run never reaches the target");
         call("carol", HttpMethod.POST, "/api/tools",
-                Map.of("role", "orders", "name", "sneaky", "type", "API_FORGE", "method", "POST", "pathTemplate", "/x"), 403);
+                Map.of("role", "orders", "name", "sneaky", "type", "API_FORGE", "method", "POST", "pathTemplate", "/x", "inputSchemaJson", "{}", "outputSchemaJson", "{}"), 403);
         JsonNode me = call("carol", HttpMethod.GET, "/api/me", null, 200);
         assertEquals("billing-team", me.get("teams").get(0).asString());
     }
@@ -265,6 +311,9 @@ class EndToEndTest {
         call("alice", HttpMethod.POST, "/api/runs/" + id + "/cancel", null, 200);
         JsonNode run = awaitRun(id, "CANCELLED", "FAILED", "SUCCEEDED");
         assertEquals("CANCELLED", run.get("status").asString(), run.toString());
+        JsonNode requests = call("alice", HttpMethod.GET, "/api/runs/" + id + "/api-calls", null, 200);
+        assertEquals(1, requests.size());
+        assertEquals("UNKNOWN", requests.get(0).get("status").asString());
         awaitNoChildren();
     }
 
@@ -282,17 +331,17 @@ class EndToEndTest {
     }
 
     @Test
-    void namedTasksAreVersionedAndPausingStopsDispatch() {
+    void namedWorkflowsAreVersionedAndPausingStopsDispatch() {
         seed();
-        JsonNode v1 = call("alice", HttpMethod.POST, "/api/tasks", Map.of("name", "lookup", "script", LOOKUP), 200);
-        String taskId = v1.get("taskId").asString();
-        JsonNode v2 = call("alice", HttpMethod.POST, "/api/tasks/" + taskId + "/versions", Map.of("script", LOOKUP + "\n// v2"), 200);
+        JsonNode v1 = call("alice", HttpMethod.POST, "/api/workflows", Map.of("name", "lookup", "script", LOOKUP), 200);
+        String workflowId = v1.get("workflowId").asString();
+        JsonNode v2 = call("alice", HttpMethod.POST, "/api/workflows/" + workflowId + "/versions", Map.of("script", LOOKUP + "\n// v2"), 200);
         assertEquals(2, v2.get("ver").asInt());
-        call("alice", HttpMethod.POST, "/api/tasks", Map.of("name", "lookup", "script", LOOKUP), 409);
-        assertEquals("orders", call("alice", HttpMethod.GET, "/api/tasks/" + taskId, null, 200).get("roles").get(0).asString());
+        call("alice", HttpMethod.POST, "/api/workflows", Map.of("name", "lookup", "script", LOOKUP), 409);
+        assertEquals("orders", call("alice", HttpMethod.GET, "/api/workflows/" + workflowId, null, 200).get("roles").get(0).asString());
 
         call("alice", HttpMethod.POST, "/api/admin/pause", Map.of("paused", true), 200);
-        String id = call("alice", HttpMethod.POST, "/api/runs", Map.of("taskId", taskId, "params", Map.of("ids", "p1")), 200).get("id").asString();
+        String id = call("alice", HttpMethod.POST, "/api/runs", Map.of("workflowId", workflowId, "params", Map.of("ids", "p1")), 200).get("id").asString();
         sleep(1000);
         assertEquals("QUEUED", call("alice", HttpMethod.GET, "/api/runs/" + id, null, 200).get("status").asString());
         call("alice", HttpMethod.POST, "/api/admin/pause", Map.of("paused", false), 200);
@@ -314,6 +363,178 @@ class EndToEndTest {
         assertEquals("FAILED", run.get("status").asString());
         assertTrue(run.get("error").asString().contains("removed from the registry"), run.toString());
         assertFalse(received.stream().anyMatch(s -> s.contains("/t1")));
+    }
+
+    @Test
+    void executionUsesTheWorkflowVersionDisplayedByTheForm() {
+        JsonNode first = call("alice", HttpMethod.POST, "/api/workflows", Map.of("name", "publish-race", "script",
+                "export default function main() { return 'first'; }"), 200);
+        String workflowId = first.get("workflowId").asString();
+        call("alice", HttpMethod.POST, "/api/workflows/" + workflowId + "/versions", Map.of("script",
+                "export default function main() { return 'second'; }"), 200);
+        JsonNode execution = call("alice", HttpMethod.POST, "/api/runs", Map.of("workflowId", workflowId, "version", 1), 200);
+        JsonNode finished = awaitRun(execution.get("id").asString(), "SUCCEEDED", "FAILED");
+        assertEquals(1, finished.get("ver").asInt());
+        assertEquals("first", JSON.readTree(finished.get("resultJson").asString()).asString());
+    }
+
+    @Test
+    void workflowPinsToolContractsAndHistoricalEvidenceSurvivesRetirement() {
+        String toolId = tool("orders", "pinned", "HTTP_CLIENT", "GET", "/orders/{id}", base() + "/direct");
+        JsonNode original = call("alice", HttpMethod.GET, "/api/tools/" + toolId, null, 200);
+        JsonNode version = call("alice", HttpMethod.POST, "/api/workflows", Map.of("name", "pinned-contract", "script",
+                "export default async function main() { return api.orders.pinned({path:{id:'pin1'}}); }"), 200);
+        Map<String,Object> update = new HashMap<>(Map.of("role", "orders", "name", "pinned", "type", "HTTP_CLIENT", "method", "GET", "pathTemplate", "/changed/{id}", "baseUrl", base() + "/direct",
+                "inputSchemaJson", original.get("inputSchemaJson").asString(), "outputSchemaJson", "{\"type\":\"string\"}"));
+        JsonNode changed = call("alice", HttpMethod.PUT, "/api/tools/" + toolId, update, 200);
+        assertEquals(2, changed.get("ver").asInt());
+        String originalVersion = original.get("versionId").asString();
+        assertEquals(originalVersion, version.get("toolBindings").get(0).get("versionId").asString());
+        String anotherTool = tool("orders", "otherPinned", "HTTP_CLIENT", "GET", "/orders/{id}", base() + "/direct");
+        var request = Map.of("path", Map.of("id", "pinDirect"));
+        call("alice", HttpMethod.POST, "/api/runs/call", Map.of("toolId", anotherTool, "toolVersionId", originalVersion, "request", request), 400);
+        JsonNode pinnedDirect = call("alice", HttpMethod.POST, "/api/runs/call", Map.of("toolId", toolId, "toolVersionId", originalVersion, "request", request), 200);
+        assertEquals("SUCCEEDED", pinnedDirect.get("status").asString());
+        assertEquals(originalVersion, pinnedDirect.get("toolVersionId").asString());
+        assertTrue(received.stream().anyMatch(entry -> entry.startsWith("GET /direct/orders/pinDirect |")));
+        JsonNode invalidOutput = call("alice", HttpMethod.POST, "/api/runs/call", Map.of("toolId", toolId, "request", Map.of("path", Map.of("id", "pin2"))), 200);
+        assertEquals("FAILED", invalidOutput.get("status").asString());
+        JsonNode outputEvidence = call("alice", HttpMethod.GET, "/api/runs/" + invalidOutput.get("id").asString() + "/tool-calls", null, 200).get(0);
+        assertFalse(outputEvidence.get("outputJson").isNull());
+        assertEquals(200, call("alice", HttpMethod.GET, "/api/runs/" + invalidOutput.get("id").asString() + "/api-calls", null, 200).get(0).get("responseStatus").asInt());
+        String id = call("bob", HttpMethod.POST, "/api/runs", Map.of("workflowId", version.get("workflowId").asString(), "params", Map.of()), 200).get("id").asString();
+        assertEquals("SUCCEEDED", awaitRun(id, "SUCCEEDED", "FAILED").get("status").asString());
+        JsonNode evidence = call("alice", HttpMethod.GET, "/api/runs/" + id + "/tool-calls", null, 200).get(0);
+        assertEquals(original.get("versionId").asString(), evidence.get("toolVersionId").asString());
+        call("alice", HttpMethod.DELETE, "/api/tools/" + toolId, null, 200);
+        assertEquals(1, call("alice", HttpMethod.GET, "/api/runs/" + id + "/tool-calls", null, 200).size());
+        assertEquals(2, call("alice", HttpMethod.GET, "/api/tools/" + toolId + "/versions", null, 200).size());
+    }
+
+    @Test
+    void invalidToolInputIsAuditedWithoutSendingHttp() {
+        String toolId = tool("orders", "validated", "HTTP_CLIENT", "GET", "/orders/{id}", base() + "/direct");
+        int before = received.size();
+        JsonNode run = call("alice", HttpMethod.POST, "/api/runs/call", Map.of("toolId", toolId, "request", Map.of("path", Map.of("id", 123))), 200);
+        assertEquals("FAILED", run.get("status").asString());
+        assertEquals(before, received.size());
+        String id = run.get("id").asString();
+        assertEquals(1, call("alice", HttpMethod.GET, "/api/runs/" + id + "/tool-calls", null, 200).size());
+        assertEquals(0, call("alice", HttpMethod.GET, "/api/runs/" + id + "/api-calls", null, 200).size());
+    }
+
+    @Test
+    void workflowOutputContractFailureKeepsTheActualOutput() {
+        String id = adhoc("alice", "export const output = {type:'string'};\nexport default function main() { return {count:1}; }", Map.of(), 200);
+        JsonNode run = awaitRun(id, "SUCCEEDED", "FAILED");
+        assertEquals("FAILED", run.get("status").asString());
+        assertTrue(run.get("error").asString().contains("workflow output"));
+        assertEquals(1, JSON.readTree(run.get("resultJson").asString()).get("count").asInt());
+    }
+
+    @Test
+    void everyGatewayHttpAttemptIsRecordedAndStartPrecedesTheRequest() {
+        String toolId = tool("orders", "retry", "API_FORGE", "GET", "/retry/{id}", null);
+        JsonNode execution = call("alice", HttpMethod.POST, "/api/runs/call", Map.of("toolId", toolId, "request", Map.of("path", Map.of("id", "retry1"))), 200);
+        assertEquals("SUCCEEDED", execution.get("status").asString());
+        JsonNode calls = call("alice", HttpMethod.GET, "/api/runs/"+execution.get("id").asString()+"/api-calls", null, 200);
+        assertEquals(2, calls.size()); assertEquals(401, calls.get(0).get("responseStatus").asInt()); assertEquals(200, calls.get(1).get("responseStatus").asInt());
+        assertEquals(calls.get(0).get("invocationId").asString(), calls.get(1).get("invocationId").asString());
+        tool("orders", "auditStart", "HTTP_CLIENT", "GET", "/audit-start/{id}", base()+"/direct");
+        sawPersistedStart = false;
+        String id = adhoc("alice", "export default function main() { return api.orders.auditStart({path:{id:'start1'}}); }", Map.of(), 200);
+        assertEquals("SUCCEEDED", awaitRun(id,"SUCCEEDED","FAILED").get("status").asString());
+        assertTrue(sawPersistedStart, "the target must only be called after the parent persists the API start record");
+    }
+
+    @Test
+    void databasePreventsActionsFromBeingAttachedToAnotherExecution() {
+        JsonNode a = awaitRun(adhoc("alice", "export default function main(){ return 1; }", Map.of(), 200), "SUCCEEDED", "FAILED");
+        JsonNode b = awaitRun(adhoc("alice", "export default function main(){ return 2; }", Map.of(), 200), "SUCCEEDED", "FAILED");
+        String actionId = java.util.UUID.randomUUID().toString();
+        db.sql("INSERT INTO execution_actions (id,execution_id,name,status,started_at) VALUES (?,?,?,'RUNNING',?)")
+                .params(actionId, a.get("id").asString(), "parent", System.currentTimeMillis()).update();
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class, () -> db.sql("INSERT INTO execution_actions (id,execution_id,parent_action_id,name,status,started_at) VALUES (?,?,?,?,'RUNNING',?)")
+                .params(java.util.UUID.randomUUID().toString(), b.get("id").asString(), actionId, "cross-execution", System.currentTimeMillis()).update());
+    }
+
+    @Test
+    void requestResponseEvidenceIsSearchableAndCredentialsAreRedacted() {
+        String toolId = tool("orders", "evidenceBody", "HTTP_CLIENT", "POST", "/orders/{id}", base()+"/direct");
+        JsonNode run = call("bob", HttpMethod.POST, "/api/runs/call", Map.of("toolId", toolId, "request", Map.of(
+                "path", Map.of("id", "body1"), "headers", Map.of("Authorization", "Bearer private-credential"),
+                "body", Map.of("operation", "repair", "password", "private-password"))), 200);
+        assertEquals("SUCCEEDED", run.get("status").asString());
+        String id=run.get("id").asString();
+        JsonNode executionInput = call("alice", HttpMethod.GET, "/api/runs/"+id+"/inputs", null, 200);
+        assertFalse(executionInput.toString().contains("private-credential"));
+        assertFalse(executionInput.toString().contains("private-password"));
+        assertFalse(run.get("paramsJson").asString().contains("private-credential"));
+        assertTrue(received.contains("POST /direct/orders/body1 | Bearer private-credential | bob"));
+        JsonNode request=call("alice", HttpMethod.GET, "/api/runs/"+id+"/api-calls", null, 200).get(0);
+        assertEquals("POST", request.get("method").asString());
+        assertTrue(request.get("requestBody").asString().contains("repair"));
+        assertFalse(request.toString().contains("private-credential"));
+        assertFalse(request.toString().contains("private-password"));
+        assertEquals("body1",JSON.readTree(request.get("responseBody").asString()).get("id").asString());
+        JsonNode matches=call("alice",HttpMethod.GET,"/api/audit/tool-invocations?actor=bob&service=commerce&role=orders&tool=evidenceBody",null,200);
+        assertEquals(1,matches.size()); assertEquals(id,matches.get(0).get("executionId").asString());
+        assertEquals(0,call("alice",HttpMethod.GET,"/api/audit/tool-invocations?actor=alice&tool=evidenceBody",null,200).size());
+    }
+
+    @Test
+    void runnerStopsBeforeHttpWhenAuditPersistenceFails() {
+        String toolId=tool("orders","auditFailure","HTTP_CLIENT","GET","/orders/{id}",base()+"/direct");
+        int before=received.size();
+        var spec=new io.prodaccess.common.protocol.RunSpec(io.prodaccess.common.protocol.RunSpec.CURRENT_VERSION,
+                java.util.UUID.randomUUID().toString(),io.prodaccess.common.protocol.RunSpec.Mode.RUN,"alice",
+                "export default function main(){return api.orders.auditFailure({path:{id:'never-sent'}});}",Map.of(),List.of(toolService.get(toolId).def()),
+                new io.prodaccess.common.protocol.RunSpec.Limits(10_000,10,100,10,1_000_000),null);
+        var outcome=runner.execute(spec,event->{ if(event.t().equals("http_start")) throw new IllegalStateException("database unavailable"); },()->false,()->{});
+        assertEquals(ChildProcessRunner.Status.FAILED,outcome.status());
+        assertEquals(before,received.size());
+        awaitNoChildren();
+    }
+
+    @Test
+    void overlappingWorkflowActionsKeepTheirOwnCallsAndResults() {
+        tool("orders", "overlapLookup", "HTTP_CLIENT", "GET", "/orders/{id}", base() + "/direct");
+        String id = adhoc("alice", """
+                export default async function main(ctx) {
+                  let release;
+                  const waiting = new Promise(resolve => { release = resolve; });
+                  const first = ctx.step('first', async action => {
+                    await Promise.resolve();
+                    return action.api.orders.overlapLookup({path: {id: 'first-order'}});
+                  });
+                  const second = ctx.step('second', async action => {
+                    await waiting;
+                    return action.step('inner', inner => inner.api.orders.overlapLookup({path: {id: 'second-order'}}));
+                  });
+                  await first;
+                  release();
+                  return second;
+                }
+                """, Map.of(), 200);
+        JsonNode run = awaitRun(id, "SUCCEEDED", "FAILED");
+        assertEquals("SUCCEEDED", run.get("status").asString(), run.toString());
+        Map<String, JsonNode> actions = new HashMap<>();
+        call("alice", HttpMethod.GET, "/api/runs/" + id + "/actions", null, 200)
+                .forEach(action -> actions.put(action.get("name").asString(), action));
+        assertEquals(3, actions.size());
+        assertTrue(actions.get("first").get("parentActionId").isNull());
+        assertTrue(actions.get("second").get("parentActionId").isNull());
+        assertEquals(actions.get("second").get("id").asString(), actions.get("inner").get("parentActionId").asString());
+        assertEquals("first-order", JSON.readTree(actions.get("first").get("resultJson").asString()).get("id").asString());
+        assertEquals("second-order", JSON.readTree(actions.get("second").get("resultJson").asString()).get("id").asString());
+
+        Map<String, String> actionByOrder = new HashMap<>();
+        call("alice", HttpMethod.GET, "/api/runs/" + id + "/tool-calls", null, 200).forEach(invocation -> {
+            String order = JSON.readTree(invocation.get("inputJson").asString()).get("path").get("id").asString();
+            actionByOrder.put(order, invocation.get("actionId").asString());
+        });
+        assertEquals(Map.of("first-order", actions.get("first").get("id").asString(),
+                "second-order", actions.get("inner").get("id").asString()), actionByOrder);
     }
 
     @Test

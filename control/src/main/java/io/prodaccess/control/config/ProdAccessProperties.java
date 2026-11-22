@@ -37,7 +37,7 @@ public record ProdAccessProperties(
                          @DefaultValue("30000") long lostAfterMs,
                          @DefaultValue("true") boolean reconcile) {}
 
-    /** Ceilings; a task may lower them via meta but never raise them. */
+    /** Ceilings; a workflow may lower them via meta but never raise them. */
     public record Limits(@DefaultValue("600000") long timeoutMs,
                          @DefaultValue("5000") int maxApiCalls,
                          @DefaultValue("10") double rps,

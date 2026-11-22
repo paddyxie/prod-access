@@ -8,8 +8,8 @@ import io.prodaccess.control.config.ProdAccessProperties;
 import io.prodaccess.control.ownership.OwnershipService;
 import io.prodaccess.control.process.ChildProcessRunner.Outcome;
 import io.prodaccess.control.process.ChildProcessRunner;
-import io.prodaccess.control.task.TaskService;
-import io.prodaccess.control.task.TaskVersion;
+import io.prodaccess.control.workflow.WorkflowService;
+import io.prodaccess.control.workflow.WorkflowVersion;
 import io.prodaccess.control.tool.Tool;
 import io.prodaccess.control.tool.ToolService;
 import java.util.ArrayList;
@@ -44,22 +44,24 @@ public class RunDispatcher {
     private final ProdAccessProperties props;
     private final ChildProcessRunner runner;
     private final RunService runs;
-    private final TaskService tasks;
+    private final WorkflowService workflows;
     private final ToolService tools;
     private final OwnershipService ownership;
+    private final ExecutionAudit evidence;
     private final String node = "node-" + UUID.randomUUID().toString().substring(0, 8);
     private final AtomicInteger active = new AtomicInteger();
 
     RunDispatcher(JdbcClient db, TransactionTemplate tx, ProdAccessProperties props, ChildProcessRunner runner,
-                  RunService runs, TaskService tasks, ToolService tools, OwnershipService ownership) {
+                  RunService runs, WorkflowService workflows, ToolService tools, OwnershipService ownership, ExecutionAudit evidence) {
         this.db = db;
         this.tx = tx;
         this.props = props;
         this.runner = runner;
         this.runs = runs;
-        this.tasks = tasks;
+        this.workflows = workflows;
         this.tools = tools;
         this.ownership = ownership;
+        this.evidence = evidence;
     }
 
     public boolean paused() {
@@ -102,9 +104,9 @@ public class RunDispatcher {
 
     private Optional<String> claim() {
         return tx.execute(s -> {
-            Optional<String> id = db.sql("SELECT id FROM runs WHERE status = 'QUEUED' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED")
+            Optional<String> id = db.sql("SELECT id FROM executions WHERE status = 'QUEUED' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED")
                     .query(String.class).optional();
-            id.ifPresent(i -> db.sql("UPDATE runs SET status = 'RUNNING', started_at = ?, heartbeat_at = ?, node = ? WHERE id = ?")
+            id.ifPresent(i -> db.sql("UPDATE executions SET status = 'RUNNING', started_at = ?, heartbeat_at = ?, node = ? WHERE id = ?")
                     .params(System.currentTimeMillis(), System.currentTimeMillis(), node, i).update());
             return id;
         });
@@ -114,10 +116,19 @@ public class RunDispatcher {
     @Scheduled(fixedDelayString = "${prodaccess.runner.sweep-ms:10000}", initialDelay = 5000)
     void sweepLost() {
         long now = System.currentTimeMillis();
-        int n = db.sql("UPDATE runs SET status = 'LOST', finished_at = ?, error = 'lost: owner stopped heartbeating' "
-                        + "WHERE status = 'RUNNING' AND heartbeat_at < ?")
-                .params(now, now - props.runner().lostAfterMs()).update();
-        if (n > 0) log.warn("marked {} run(s) LOST", n);
+        long cutoff = now - props.runner().lostAfterMs();
+        List<String> candidates = db.sql("SELECT id FROM executions WHERE status = 'RUNNING' AND heartbeat_at < ?")
+                .param(cutoff).query(String.class).list();
+        for (String id : candidates) {
+            // A concurrent heartbeat or completion may have made this candidate current again.
+            tx.executeWithoutResult(s -> {
+                int updated = db.sql("""
+                        UPDATE executions SET status = 'LOST', finished_at = ?, error = 'lost: owner stopped heartbeating'
+                        WHERE id = ? AND status = 'RUNNING' AND heartbeat_at < ?""")
+                        .params(now, id, cutoff).update();
+                if (updated > 0) evidence.closeIncomplete(id, "execution owner lost; remote outcome is unknown");
+            });
+        }
     }
 
     // ---- execution
@@ -125,7 +136,7 @@ public class RunDispatcher {
     @SuppressWarnings("unchecked")
     void execute(String runId) {
         Run run = runs.get(runId);
-        TaskVersion v = tasks.version(run.taskId(), run.ver());
+        WorkflowVersion v = workflows.versionById(run.workflowVersionId());
 
         // Re-check at the last moment: ownership and the registry may have changed while the run was queued.
         Set<String> notOwned = ownership.notOwned(run.submittedBy(), v.roles());
@@ -133,11 +144,9 @@ public class RunDispatcher {
             finish(runId, RunStatus.FAILED, null, "ownership lost while queued: none of your teams owns " + String.join(", ", notOwned));
             return;
         }
-        Map<String, Tool> registered = tools.byKey(v.tools());
         List<ToolDef> defs = new ArrayList<>();
-        for (String key : v.tools()) {
-            Tool t = registered.get(key);
-            if (t == null) { finish(runId, RunStatus.FAILED, null, "tool " + key + " was removed from the registry"); return; }
+        for (Tool t : tools.forWorkflowVersion(v.id())) {
+            if (t.retired()) { finish(runId, RunStatus.FAILED, null, "tool " + t.key() + " was removed from the registry (retired)"); return; }
             defs.add(t.def());
         }
 
@@ -154,19 +163,25 @@ public class RunDispatcher {
                     long now = System.currentTimeMillis();
                     if (!cancel[0] && now - lastCancelCheck[0] > 1000) {
                         lastCancelCheck[0] = now;
-                        cancel[0] = db.sql("SELECT cancel_requested FROM runs WHERE id = ?").param(runId).query(Boolean.class).single();
+                        cancel[0] = db.sql("SELECT cancel_requested FROM executions WHERE id = ?").param(runId).query(Boolean.class).single();
                     }
                     return cancel[0];
                 },
-                () -> db.sql("UPDATE runs SET heartbeat_at = ? WHERE id = ? AND status = 'RUNNING'")
+                () -> db.sql("UPDATE executions SET heartbeat_at = ? WHERE id = ? AND status = 'RUNNING'")
                         .params(System.currentTimeMillis(), runId).update());
 
-        finish(runId, RunStatus.valueOf(outcome.status().name()), outcome.resultJson(), outcome.error());
+        RunStatus status = RunStatus.valueOf(outcome.status().name());
+        String error = outcome.error();
+        if (status == RunStatus.SUCCEEDED && outcome.resultJson() != null) {
+            try { io.prodaccess.common.schema.Schema.validate(v.outputSchemaJson(), Json.readTree(outcome.resultJson()), "workflow output"); }
+            catch (IllegalArgumentException e) { status = RunStatus.FAILED; error = e.getMessage(); }
+        }
+        finish(runId, status, outcome.resultJson(), error);
     }
 
     private void record(String runId, RunEvent ev, AtomicLong logBytes, AtomicBoolean truncated, int maxLogBytes) {
+        if (evidence.record(runId, ev)) return;
         switch (ev.t()) {
-            case "tool" -> runs.recordToolCall(runId, ev);
             case "log", "step", "error" -> {
                 String msg = ev.t().equals("step") ? ev.name() + " " + ev.state() : ev.msg();
                 if (logBytes.addAndGet(msg == null ? 0 : msg.length()) > maxLogBytes) {
@@ -180,14 +195,14 @@ public class RunDispatcher {
     }
 
     private void insertEvent(String runId, long ts, String kind, String lvl, String message) {
-        db.sql("INSERT INTO run_events (run_id, ts, kind, lvl, message) VALUES (?,?,?,?,?)").params(runId, ts, kind, lvl, message).update();
+        db.sql("INSERT INTO execution_events (execution_id, ts, kind, lvl, message) VALUES (?,?,?,?,?)").params(runId, ts, kind, lvl, message).update();
     }
 
     private void finish(String runId, RunStatus status, String resultJson, String error) {
         if (!runs.finish(runId, status, resultJson, error)) log.warn("run {} was no longer RUNNING when it finished as {} (swept as LOST?)", runId, status);
     }
 
-    /** Ceilings from configuration; a task's meta may only lower them. */
+    /** Ceilings from configuration; a workflow's meta may only lower them. */
     private RunSpec.Limits limits(Map<String, Object> meta) {
         ProdAccessProperties.Limits cap = props.limits();
         long timeout = cap.timeoutMs();

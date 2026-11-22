@@ -14,6 +14,6 @@ export const kindOptions: Option[] = [
 export const toolTypeOptions: Option[] = TOOL_TYPES.map((t) => ({ value: t, label: TOOL_TYPE_LABEL[t] }));
 
 export const roleOptions = async (): Promise<Option[]> =>
-  [...new Set((await api.tools.list()).map((t) => t.role))].map((r) => ({ value: r, label: r }));
+  (await api.catalog.roles()).map((r) => ({ value: r.code, label: `${r.serviceCode} / ${r.code}` }));
 
-export const taskOptions = async (): Promise<Option[]> => (await api.tasks.list()).map((t) => ({ value: t.id, label: t.name ?? t.id }));
+export const taskOptions = async (): Promise<Option[]> => (await api.workflows.list()).map((t) => ({ value: t.id, label: t.name ?? t.id }));

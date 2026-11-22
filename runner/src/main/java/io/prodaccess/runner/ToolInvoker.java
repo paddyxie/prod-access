@@ -1,10 +1,8 @@
 package io.prodaccess.runner;
 
 import io.prodaccess.common.json.Json;
-import io.prodaccess.common.protocol.RunEvent;
 import io.prodaccess.common.protocol.RunSpec;
 import io.prodaccess.common.protocol.ToolDef;
-import io.prodaccess.common.tool.ToolRequest;
 import io.prodaccess.common.tool.ToolResponse;
 import io.prodaccess.common.tool.Tools;
 import java.util.HashMap;
@@ -20,16 +18,14 @@ import java.util.Map;
 final class ToolInvoker {
     private final Map<String, ToolDef> tools = new HashMap<>();
     private final Tools clients;
-    private final Emitter emitter;
     private final RunSpec.Limits limits;
     private int calls;
     private int consecutiveFailures;
     private long nextSlotNanos = System.nanoTime();
 
-    ToolInvoker(List<ToolDef> allowed, Tools clients, Emitter emitter, RunSpec.Limits limits) {
+    ToolInvoker(List<ToolDef> allowed, Tools clients, RunSpec.Limits limits) {
         allowed.forEach(t -> tools.put(t.key(), t));
         this.clients = clients;
-        this.emitter = emitter;
         this.limits = limits;
     }
 
@@ -40,18 +36,13 @@ final class ToolInvoker {
     String call(String key, String argsJson) {
         ToolDef tool = tools.get(key);
         if (tool == null) return fail("tool " + key + " is not permitted for this run", null, null);
-        if (++calls > limits.maxApiCalls()) return fail("tool call budget exceeded (" + limits.maxApiCalls() + ")", null, null);
-        if (consecutiveFailures >= limits.maxConsecutiveFailures()) {
-            return fail("circuit open: " + consecutiveFailures + " consecutive failures", null, null);
-        }
-        pace();
-
-        long t0 = System.nanoTime();
-        Integer status = null;
-        String err = null;
+        String rejection = null;
+        if (++calls > limits.maxApiCalls()) rejection = "tool call budget exceeded (" + limits.maxApiCalls() + ")";
+        else if (consecutiveFailures >= limits.maxConsecutiveFailures()) rejection = "circuit open: " + consecutiveFailures + " consecutive failures";
+        if (rejection == null) pace();
+        String err;
         try {
-            ToolResponse r = clients.call(tool, ToolRequest.from(Json.read(argsJson, Map.class)));
-            status = r.status();
+            ToolResponse r = clients.call(tool, Json.read(argsJson, Map.class), rejection);
             if (r.ok()) {
                 consecutiveFailures = 0;
                 Map<String, Object> ok = new LinkedHashMap<>();
@@ -70,8 +61,6 @@ final class ToolInvoker {
             err = e.getClass().getSimpleName() + ": " + e.getMessage();
             consecutiveFailures++;
             return fail(err, null, null);
-        } finally {
-            emitter.emit(RunEvent.tool(tool, status, (System.nanoTime() - t0) / 1_000_000, err));
         }
     }
 

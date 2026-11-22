@@ -5,6 +5,7 @@ import { useResource } from '../../hooks/useResource';
 import { DataTable, type Column } from './DataTable';
 import { FilterBar, type FilterDef } from './FilterBar';
 import { PageHeader } from './PageHeader';
+import { PageBody } from './PageBody';
 
 interface Props<T> {
   title: string;
@@ -39,11 +40,15 @@ export function ListPage<T>({ title, subtitle, actions, filters, load, columns, 
     );
 
   return (
-    <Stack spacing={2}>
+    <>
       <PageHeader title={title} subtitle={subtitle} actions={actions} />
-      {filters.length > 0 && <FilterBar defs={filters} values={values} onChange={setFilter} onReset={() => setParams({}, { replace: true })} />}
-      {error && <Alert severity="error">{error.message}</Alert>}
-      <DataTable columns={columns} rows={data} rowKey={rowKey} rowLink={rowLink} loading={loading} emptyText={emptyText} />
-    </Stack>
+      <PageBody>
+        <Stack spacing={1.5}>
+          {filters.length > 0 && <FilterBar defs={filters} values={values} onChange={setFilter} onReset={() => setParams({}, { replace: true })} />}
+          {error && <Alert severity="error">{error.message}</Alert>}
+          <DataTable columns={columns} rows={data} rowKey={rowKey} rowLink={rowLink} loading={loading} emptyText={emptyText} />
+        </Stack>
+      </PageBody>
+    </>
   );
 }

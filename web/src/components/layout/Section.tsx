@@ -10,14 +10,14 @@ interface Props {
 /** A titled block of a detail page. */
 export function Section({ title, actions, children }: Props) {
   return (
-    <Paper variant="outlined" sx={{ p: 2 }}>
-      <Stack direction="row" sx={{ alignItems: 'center', mb: 1.5, minHeight: 32 }}>
+    <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
+      <Stack direction="row" sx={{ alignItems: 'center', minHeight: 40, px: 2, gap: 1, borderBottom: 1, borderColor: 'divider' }}>
         <Typography variant="subtitle1" component="h2" sx={{ fontWeight: 600, flex: 1 }}>
           {title}
         </Typography>
         {actions}
       </Stack>
-      <Box>{children}</Box>
+      <Box sx={{ p: { xs: 1.5, sm: 2 } }}>{children}</Box>
     </Paper>
   );
 }

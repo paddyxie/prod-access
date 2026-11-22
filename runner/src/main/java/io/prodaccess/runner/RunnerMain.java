@@ -3,6 +3,7 @@ package io.prodaccess.runner;
 import io.prodaccess.common.json.Json;
 import io.prodaccess.common.protocol.RunEvent;
 import io.prodaccess.common.protocol.RunSpec;
+import io.prodaccess.common.tool.AuditCapture;
 import io.prodaccess.common.tool.Tools;
 import io.prodaccess.runner.sandbox.Sandbox;
 import java.io.BufferedReader;
@@ -12,17 +13,22 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Child process entry. Protocol: first stdin line = {@link RunSpec} JSON; later stdin lines are commands
  * ("cancel"); stdout = one {@link RunEvent} JSON per line. One process serves exactly one run, then exits.
  *
- * <p>Exit codes: 0 success, 1 task failed, 2 bad spec, 124 timed out, 130 cancelled, 70 lost the parent.
+ * <p>Exit codes: 0 success, 1 workflow failed, 2 bad spec, 124 timed out, 130 cancelled, 70 lost the parent.
  */
 public final class RunnerMain {
     private static final int HEARTBEAT_MS = 2_000;
     private static final int MAX_SPEC_BYTES = 16 * 1024 * 1024;
 
+    private static final java.util.concurrent.BlockingQueue<String> acknowledgements = new java.util.concurrent.LinkedBlockingQueue<>();
     private static volatile Sandbox sandbox;
     private static volatile int cancelExit = -1;
 
@@ -65,9 +71,10 @@ public final class RunnerMain {
     private static int inspect(RunSpec spec, Emitter emitter) {
         Sandbox.Host host = new Sandbox.Host() {
             public String tools() { return "[]"; }
-            public String call(String tool, String argsJson) { return "{\"ok\":false,\"error\":\"tools cannot be called while inspecting\"}"; }
+            public String call(String tool, String argsJson, String actionId) { return "{\"ok\":false,\"error\":\"tools cannot be called while inspecting\"}"; }
             public void log(String level, String message) {}
-            public void step(String name, String state) {}
+            public String beginStep(String name, String parentId, String inputJson) { return UUID.randomUUID().toString(); }
+            public void endStep(String id, String name, String state, String payloadJson) {}
         };
         try (Sandbox sb = new Sandbox(host)) {
             sandbox = sb;
@@ -82,12 +89,45 @@ public final class RunnerMain {
     }
 
     private static int run(RunSpec spec, Emitter emitter) {
-        ToolInvoker invoker = new ToolInvoker(spec.tools(), new Tools(spec.apiForge(), spec.runId(), spec.actor()), emitter, spec.limits());
+        // A tool host call is synchronous. Supply its explicitly resolved action ID to the client for its duration.
+        var callAction = new AtomicReference<String>();
+        Tools clients = new Tools(spec.apiForge(), spec.runId(), spec.actor(), ev -> emitEvidence(emitter, ev), callAction::get);
+        ToolInvoker invoker = new ToolInvoker(spec.tools(), clients, spec.limits());
         Sandbox.Host host = new Sandbox.Host() {
             public String tools() { return Json.write(invoker.keys()); }
-            public String call(String tool, String argsJson) { return invoker.call(tool, argsJson); }
+            public String call(String tool, String argsJson, String actionId) {
+                callAction.set(actionId.isEmpty() ? null : actionId);
+                try {
+                    return invoker.call(tool, argsJson);
+                } finally {
+                    callAction.set(null);
+                }
+            }
             public void log(String level, String message) { emitter.emit(RunEvent.log(level, Emitter.clip(message))); }
-            public void step(String name, String state) { emitter.emit(RunEvent.step(name, state)); }
+            public String beginStep(String name, String parentId, String inputJson) {
+                String id = UUID.randomUUID().toString();
+                Map<String, Object> data = new LinkedHashMap<>();
+                data.put("id", id);
+                data.put("parentId", parentId.isEmpty() ? null : parentId);
+                data.put("name", name);
+                data.put("inputJson", AuditCapture.json(Json.readTree(inputJson)).text());
+                emitEvidence(emitter, RunEvent.withValue("action_start", data));
+                emitter.emit(RunEvent.step(name, "start"));
+                return id;
+            }
+            public void endStep(String id, String name, String state, String payloadJson) {
+                Map<String, Object> data = new LinkedHashMap<>();
+                data.put("id", id);
+                data.put("status", state.equals("ok") ? "SUCCEEDED" : "FAILED");
+                Object payload = Json.readTree(payloadJson);
+                if (state.equals("ok")) {
+                    data.put("resultJson", AuditCapture.json(payload).text());
+                } else {
+                    data.put("error", Emitter.clip(String.valueOf(payload)));
+                }
+                emitEvidence(emitter, RunEvent.withValue("action_end", data));
+                emitter.emit(RunEvent.step(name, state));
+            }
         };
         try (Sandbox sb = new Sandbox(host)) {
             sandbox = sb;
@@ -105,6 +145,19 @@ public final class RunnerMain {
         }
     }
 
+    private static void emitEvidence(Emitter emitter, RunEvent event) {
+        emitter.emit(event);
+        if (event.t().endsWith("_start")) {
+            String id = String.valueOf(((java.util.Map<?,?>) event.value()).get("id"));
+            try {
+                String acknowledged = acknowledgements.poll(10, java.util.concurrent.TimeUnit.SECONDS);
+                if (!id.equals(acknowledged)) throw new IllegalStateException("audit persistence was not acknowledged");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt(); throw new IllegalStateException("interrupted while recording audit", e);
+            }
+        }
+    }
+
     /** Reads commands after the spec; EOF means the parent is gone, so exit instead of lingering. */
     private static void startControlThread(BufferedReader stdin) {
         Thread t = new Thread(() -> {
@@ -112,6 +165,7 @@ public final class RunnerMain {
                 String l;
                 while ((l = stdin.readLine()) != null) {
                     if (l.equals("cancel")) cancel(130);
+                    else if (l.startsWith("audit-ack:")) acknowledgements.offer(l.substring(10));
                 }
             } catch (IOException ignored) {
                 // treated like EOF
